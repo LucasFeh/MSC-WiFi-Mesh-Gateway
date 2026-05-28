@@ -2,23 +2,140 @@
 
 const char *MESH_TAG = "mesh_main";
 
+esp_netif_t *netif_sta = NULL;
+const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66 };
+
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
 
-static const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
-static esp_netif_t *netif_sta = NULL;
 static volatile bool pending_read_response  = false;
-static read_response_t queued_response      = {0};
 
+
+typedef struct __attribute__((packed)) {
+    uint16_t msg_id;
+    uint8_t  ch1;
+    uint8_t  ch2;
+    uint8_t  ch3;
+} read_response_t;
+
+read_response_t queued_response = {0};
 
 void mac_to_str(const uint8_t mac[6], char *out)
 {
     snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+esp_err_t esp_mesh_comm_p2p_start(void)
+{
+    static bool is_comm_p2p_started = false;
+    if (!is_comm_p2p_started) {
+        is_comm_p2p_started = true;
+        xTaskCreate(esp_mesh_p2p_tx_main, "MPTX", 8192, NULL, 5, NULL);
+        xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 8192, NULL, 5, NULL);
+    }
+    return ESP_OK;
+}
+
+void start_mesh(void)
+{
+    gpio_reset_pin(LED_ROOT_PIN);
+    gpio_set_direction(LED_ROOT_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_ROOT_PIN, 0);
+
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_ret);
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
+    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&config));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    bool is_root_node = false;
+    uint8_t self_mac[6];
+    const uint8_t root_mac[6] = ROOT_MAC;
+    esp_wifi_get_mac(WIFI_IF_STA, self_mac);
+    if (memcmp(self_mac, root_mac, 6) == 0) {
+        ESP_LOGI(MESH_TAG, "[MESH] ROOT fixo identificado, iniciando como root");
+        gpio_set_level(LED_ROOT_PIN, 1);
+        is_root_node = true;
+    } else {
+        ESP_LOGI(MESH_TAG, "[MESH] nó não-root: aguardando root...");
+    }
+
+    ESP_ERROR_CHECK(esp_mesh_init());
+    ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
+    ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
+    ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
+    ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
+#ifdef CONFIG_MESH_ENABLE_PS
+    ESP_ERROR_CHECK(esp_mesh_enable_ps());
+    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
+    ESP_ERROR_CHECK(esp_mesh_set_announce_interval(600, 3300));
+#else
+    ESP_ERROR_CHECK(esp_mesh_disable_ps());
+    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
+#endif
+    mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
+    memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
+    cfg.channel = CONFIG_MESH_CHANNEL;
+    if (is_root_node) {
+        cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
+        memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
+        memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
+               strlen(CONFIG_MESH_ROUTER_PASSWD));
+    } else {
+        cfg.router.ssid_len = strlen("MESH_NO_ROUTER");
+        memcpy((uint8_t *) &cfg.router.ssid, "MESH_NO_ROUTER", cfg.router.ssid_len);
+    }
+    ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
+    cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
+    cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
+    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD,
+           strlen(CONFIG_MESH_AP_PASSWD));
+    ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
+
+    esp_mesh_fix_root(true);
+    if (is_root_node) {
+        esp_mesh_set_type(MESH_ROOT);
+    } else {
+        esp_mesh_set_type(MESH_NODE);
+    }
+
+    ESP_ERROR_CHECK(esp_mesh_start());
+    esp_mesh_set_group_id((mesh_addr_t *)&MESH_GROUP_ADDR, 1);
+
+    if (!is_root_node) {
+        while (!is_mesh_connected) {
+            gpio_set_level(LED_ROOT_PIN, 1);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            gpio_set_level(LED_ROOT_PIN, 0);
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+    }
+
+#ifdef CONFIG_MESH_ENABLE_PS
+    ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
+    ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
+#endif
+    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",
+             esp_get_minimum_free_heap_size(),
+             esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
+             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)" : "(tree)",
+             esp_mesh_is_ps_enabled());
 }
 
 void app_main(void)
@@ -63,7 +180,6 @@ void esp_mesh_p2p_rx_main(void *arg)
                 case BIN_MSG_STATUS:
                     
                     status_msg_t *s = (status_msg_t *)data.data;
-                    char from_str[18];
                     char parent_str[18];
                     mac_to_str(from.addr, from_str);
                     mac_to_str(s->parent_mac, parent_str);
@@ -119,4 +235,76 @@ void esp_mesh_p2p_tx_main(void *arg)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     vTaskDelete(NULL);
+}
+
+void mesh_event_handler(void *arg, esp_event_base_t event_base,
+                        int32_t event_id, void *event_data)
+{
+    mesh_addr_t id = {0,};
+    static uint16_t last_layer = 0;
+
+    switch (event_id) {
+    case MESH_EVENT_STARTED:
+        esp_mesh_get_id(&id);
+        ESP_LOGI(MESH_TAG, "[MESH] started, ID:"MACSTR"", MAC2STR(id.addr));
+        is_mesh_connected = false;
+        mesh_layer = esp_mesh_get_layer();
+        break;
+    case MESH_EVENT_STOPPED:
+        ESP_LOGI(MESH_TAG, "[MESH] stopped");
+        is_mesh_connected = false;
+        mesh_layer = esp_mesh_get_layer();
+        break;
+    case MESH_EVENT_CHILD_CONNECTED: {
+        mesh_event_child_connected_t *child = (mesh_event_child_connected_t *)event_data;
+        ESP_LOGI(MESH_TAG, "[MESH] child connected: "MACSTR"", MAC2STR(child->mac));
+        break;
+    }
+    case MESH_EVENT_CHILD_DISCONNECTED: {
+        mesh_event_child_disconnected_t *child = (mesh_event_child_disconnected_t *)event_data;
+        ESP_LOGI(MESH_TAG, "[MESH] child disconnected: "MACSTR"", MAC2STR(child->mac));
+        if (is_got_ip)
+            notify_offline(child->mac);
+        break;
+    }
+    case MESH_EVENT_PARENT_CONNECTED: {
+        mesh_event_connected_t *connected = (mesh_event_connected_t *)event_data;
+        esp_mesh_get_id(&id);
+        mesh_layer = connected->self_layer;
+        memcpy(&mesh_parent_addr.addr, connected->connected.bssid, 6);
+        ESP_LOGI(MESH_TAG, "[MESH] parent connected, layer:%d->%d, parent:"MACSTR"%s",
+                 last_layer, mesh_layer, MAC2STR(mesh_parent_addr.addr),
+                 esp_mesh_is_root() ? " <ROOT>" : "");
+        last_layer = mesh_layer;
+        is_mesh_connected = true;
+        gpio_set_level(LED_ROOT_PIN, 1);
+        esp_netif_dhcpc_stop(netif_sta);
+        esp_netif_dhcpc_start(netif_sta);
+        esp_mesh_comm_p2p_start();
+        break;
+    }
+    case MESH_EVENT_PARENT_DISCONNECTED: {
+        mesh_event_disconnected_t *disconnected = (mesh_event_disconnected_t *)event_data;
+        ESP_LOGI(MESH_TAG, "[MESH] parent disconnected, reason:%d", disconnected->reason);
+        is_mesh_connected = false;
+        mesh_layer = esp_mesh_get_layer();
+        xTaskCreate(led_search_task, "LEDSRCH", 2048, NULL, 3, NULL);
+        break;
+    }
+    case MESH_EVENT_LAYER_CHANGE: {
+        mesh_event_layer_change_t *layer_change = (mesh_event_layer_change_t *)event_data;
+        mesh_layer = layer_change->new_layer;
+        ESP_LOGI(MESH_TAG, "[MESH] layer change: %d->%d%s",
+                 last_layer, mesh_layer, esp_mesh_is_root() ? " <ROOT>" : "");
+        last_layer = mesh_layer;
+        break;
+    }
+    case MESH_EVENT_ROOT_ADDRESS: {
+        mesh_event_root_address_t *root_addr = (mesh_event_root_address_t *)event_data;
+        ESP_LOGI(MESH_TAG, "[MESH] root address: "MACSTR"", MAC2STR(root_addr->addr));
+        break;
+    }
+    default:
+        break;
+    }
 }
