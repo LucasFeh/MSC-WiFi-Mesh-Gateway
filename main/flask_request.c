@@ -1,0 +1,126 @@
+#include "mesh_main.h"
+
+static esp_websocket_client_handle_t ws_client = NULL;
+
+static void root_ws_task(void *arg);
+
+void ip_event_handler(void *arg, esp_event_base_t event_base,
+                      int32_t event_id, void *event_data)
+{
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        is_got_ip = true;
+        ESP_LOGI(MESH_TAG, "[IP] got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        if (esp_mesh_is_root())
+            xTaskCreate(root_ws_task, "ROOTWS", 8192, NULL, 5, NULL);
+    } else {
+        is_got_ip = false;
+        ESP_LOGW(MESH_TAG, "[IP] IP perdido");
+    }
+}
+
+static void ws_event_handler(void *arg, esp_event_base_t base,
+                              int32_t event_id, void *event_data)
+{
+    esp_websocket_event_data_t *d = (esp_websocket_event_data_t *)event_data;
+    if (event_id == WEBSOCKET_EVENT_DATA && d->op_code == 0x01) {
+        if (d->data_len > 0 && strstr(d->data_ptr, "READ") != NULL) {
+            ESP_LOGI(MESH_TAG, "[WS] READ_REQUEST recebido");
+            pending_read_broadcast = true;
+        }
+    } else if (event_id == WEBSOCKET_EVENT_CONNECTED) {
+        ESP_LOGI(MESH_TAG, "[WS] conectado ao Flask");
+    } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
+        ESP_LOGW(MESH_TAG, "[WS] desconectado do Flask");
+    }
+}
+
+static void root_ws_task(void *arg)
+{
+    esp_websocket_client_config_t cfg = {
+        .uri              = FLASK_WS_URL,
+        .reconnect_timeout_ms = 3000,
+    };
+    ws_client = esp_websocket_client_init(&cfg);
+    esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, ws_event_handler, NULL);
+    esp_websocket_client_start(ws_client);
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+    vTaskDelete(NULL);
+}
+
+void post_reading_to_flask(const char *mac_str, uint8_t ch1, uint8_t ch2, uint8_t ch3)
+{
+    if (!is_got_ip) return;
+
+    char body[128];
+    int n = snprintf(body, sizeof(body),
+                     "{\"mac\":\"%s\",\"CH1\":%d,\"CH2\":%d,\"CH3\":%d}",
+                     mac_str, ch1, ch2, ch3);
+
+    esp_http_client_config_t cfg = {
+        .url        = FLASK_READING_URL,
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, n);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t layer, int8_t rssi, const char *version)
+{
+    if (!is_got_ip) return;
+
+    char body[160];
+    int n = snprintf(body, sizeof(body),
+                     "{\"mac\":\"%s\",\"parent\":\"%s\",\"layer\":%d,\"rssi\":%d,\"version\":\"%s\"}",
+                     mac_str, parent_str, layer, rssi, version);
+
+    esp_http_client_config_t cfg = {
+        .url        = FLASK_STATUS_URL,
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, n);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+void notify_offline(const uint8_t mac[6])
+{
+    char mac_str[18];
+    mac_to_str(mac, mac_str);
+    char body[64];
+    int n = snprintf(body, sizeof(body), "{\"mac\":\"%s\"}", mac_str);
+
+    esp_http_client_config_t cfg = {
+        .url        = "http://192.168.15.213:5000/api/offline",
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, n);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+void led_search_task(void *arg)
+{
+    while (!is_mesh_connected) {
+        gpio_set_level(LED_ROOT_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(150));
+        gpio_set_level(LED_ROOT_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+    vTaskDelete(NULL);
+}
