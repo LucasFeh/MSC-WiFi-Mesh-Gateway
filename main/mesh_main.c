@@ -141,8 +141,12 @@ void start_mesh(void)
 void app_main(void)
 {
     esp_ota_mark_app_valid_cancel_rollback();
-    esp_log_level_set("*", ESP_LOG_NONE);
+    // esp_log_level_set("*", ESP_LOG_NONE);
     esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
+
+    i2c_slave_init();
+    xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);
     start_mesh();
 }
 
@@ -206,9 +210,19 @@ void esp_mesh_p2p_tx_main(void *arg)
                 .proto = MESH_PROTO_BIN,
                 .tos   = MESH_TOS_P2P,
             };
-            for (int i = 0; i < READ_TARGET_COUNT; i++) {
+
+            /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
+            uint8_t local_macs[MAX_MACS][6];
+            int local_count = 0;
+            if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                local_count = i2c_mac_count;
+                memcpy(local_macs, i2c_macs, local_count * 6);
+                xSemaphoreGive(i2c_macs_mutex);
+            }
+
+            for (int i = 0; i < local_count; i++) {
                 mesh_addr_t dest;
-                memcpy(dest.addr, READ_TARGET_MACS[i], 6);
+                memcpy(dest.addr, local_macs[i], 6);
                 esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
                 ESP_LOGI(MESH_TAG, "[TX] READ_REQUEST -> "MACSTR, MAC2STR(dest.addr));
             }
