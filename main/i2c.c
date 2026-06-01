@@ -94,14 +94,12 @@ static void i2c_on_receive(const char *buffer)
     if (strcmp(buffer, "COMMIT") == 0) {
         RequestSendFlag = true;
         flagCommit = true;
-        ESP_LOGI(TAG, "Commit!");
         return;
     }
 
     if (strcmp(buffer, "UNCOMMIT") == 0) {
         RequestSendFlag = true;
         flagUnCommit = true;
-        ESP_LOGI(TAG, "Descomissionar!");
         return;
     }
 
@@ -174,9 +172,9 @@ void i2c_slave_task(void *arg)
 
         /* ---- Dados válidos recebidos (len > 0) ---- */
         ESP_LOGI(TAG, "Recebido %d byte(s) do master:", len);
-
-        /* 1) Bytes em hexadecimal */
-        ESP_LOG_BUFFER_HEX(TAG, rx_data, len);
+        
+        // /* 1) Bytes em hexadecimal */
+        // ESP_LOG_BUFFER_HEX(TAG, rx_data, len);
 
         /* 2) Conteúdo recebido como string null-terminada (bytes crus) */
         int n = (len < (int)sizeof(printable) - 1) ? len : (int)sizeof(printable) - 1;
@@ -184,6 +182,8 @@ void i2c_slave_task(void *arg)
         printable[n] = '\0';
 
         /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino) */
+        
+        ESP_LOGI(TAG, "Texto:  %s", printable);
         i2c_on_receive(printable);
     }
 }

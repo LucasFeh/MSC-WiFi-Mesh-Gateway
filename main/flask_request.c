@@ -2,6 +2,9 @@
 
 static esp_websocket_client_handle_t ws_client = NULL;
 
+/* true = Flask está online e aceitando dados; false = envios pausados */
+static volatile bool flask_connected = false;
+
 static void root_ws_task(void *arg);
 
 void ip_event_handler(void *arg, esp_event_base_t event_base,
@@ -29,17 +32,19 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
             pending_read_broadcast = true;
         }
     } else if (event_id == WEBSOCKET_EVENT_CONNECTED) {
-        ESP_LOGI(MESH_TAG, "[WS] conectado ao Flask");
+        flask_connected = true;
+        ESP_LOGI(MESH_TAG, "[WS] Flask online – envio de dados ativado");
     } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
-        ESP_LOGW(MESH_TAG, "[WS] desconectado do Flask");
+        flask_connected = false;
+        ESP_LOGW(MESH_TAG, "[WS] Flask offline – envio de dados pausado");
     }
 }
 
 static void root_ws_task(void *arg)
 {
     esp_websocket_client_config_t cfg = {
-        .uri              = FLASK_WS_URL,
-        .reconnect_timeout_ms = 3000,
+        .uri                  = FLASK_WS_URL,
+        .reconnect_timeout_ms = 10000,  /* tenta reconectar a cada 10 s até o Flask ligar */
     };
     ws_client = esp_websocket_client_init(&cfg);
     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, ws_event_handler, NULL);
@@ -52,7 +57,7 @@ static void root_ws_task(void *arg)
 
 void post_reading_to_flask(const char *mac_str, uint8_t ch1, uint8_t ch2, uint8_t ch3)
 {
-    if (!is_got_ip) return;
+    if (!is_got_ip || !flask_connected) return;
 
     char body[128];
     int n = snprintf(body, sizeof(body),
@@ -74,7 +79,7 @@ void post_reading_to_flask(const char *mac_str, uint8_t ch1, uint8_t ch2, uint8_
 
 void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t layer, int8_t rssi, const char *version)
 {
-    if (!is_got_ip) return;
+    if (!is_got_ip || !flask_connected) return;
 
     char body[160];
     int n = snprintf(body, sizeof(body),
@@ -96,6 +101,8 @@ void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t l
 
 void notify_offline(const uint8_t mac[6])
 {
+    if (!is_got_ip || !flask_connected) return;
+
     char mac_str[18];
     mac_to_str(mac, mac_str);
     char body[64];

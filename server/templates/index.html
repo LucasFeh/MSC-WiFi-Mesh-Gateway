@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="utf-8">
+    <title>ESP Mesh Monitor</title>
+    <link rel="stylesheet" href="/static/style/styles.css">
+</head>
+
+<body>
+    <header>
+        <h1>ESP-WIFI-MESH Monitor</h1>
+        <div style="display:flex;align-items:center;gap:12px">
+            <small>tempo real &middot; <span id="updated">--</span></small>
+            <button class="topo-btn" onclick="window.open('/topology','_blank')">&#127760; Topologia</button>
+        </div>
+    </header>
+
+    <div class="kpi-bar">
+        <div class="kpi-card">
+            <div class="kpi-label">Online agora</div>
+            <div class="kpi-val kpi-green" id="statTotal">0</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Total vistos</div>
+            <div class="kpi-val kpi-blue" id="statChildren">0</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Offline</div>
+            <div class="kpi-val kpi-red" id="statOffline">0</div>
+        </div>
+        <div class="kpi-card kpi-root">
+            <div class="kpi-label">Root</div>
+            <div class="kpi-root-row">
+                <span class="mono" id="rootMac">--</span>
+                <span class="root-pill root-pill-off" id="rootPill">Offline</span>
+            </div>
+        </div>
+        <div class="kpi-card kpi-ota">
+            <div class="kpi-label">Firmware OTA</div>
+            <div class="ota-row">
+                <label class="ota-file-label" for="fwFile">
+                    <span class="ota-file-name" id="fwFileName">Escolher .bin&hellip;</span>
+                    <span class="ota-file-pick">Procurar</span>
+                    <input id="fwFile" type="file" accept=".bin" class="ota-input-hidden">
+                </label>
+                <button onclick="sendOta()" class="ota-btn">Enviar OTA</button>
+            </div>
+            <div id="otaStatus" class="ota-status"></div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Leituras</div>
+            <button onclick="dispararLeitura()" class="ota-btn" id="readBtn">Disparar Leitura</button>
+            <div id="readStatus" class="ota-status"></div>
+        </div>
+    </div>
+
+    <main>
+        <section>
+            <h2>Dispositivos &mdash; <span id="devOnline">0</span> online / <span id="devCount">0</span> total</h2>
+            <div class="devices-scroll">
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>MAC</th>
+                                <th>Layer</th>
+                                <th>Versão</th>
+                                <th>RSSI</th>
+                                <th>Hits</th>
+                                <th>Visto</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devices">
+                            <tr>
+                                <td colspan="6" class="empty">Aguardando dispositivos&hellip;</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+        <section>
+            <h2>Leituras</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>MAC</th>
+                            <th>CH1</th>
+                            <th>CH2</th>
+                            <th>CH3</th>
+                            <th>Hora</th>
+                        </tr>
+                    </thead>
+                    <tbody id="readings">
+                        <tr><td colspan="5" class="empty">Aguardando leitura&hellip;</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="/static/script/script.js"></script>
+</body>
+
+</html>
