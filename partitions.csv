@@ -1,5 +1,7 @@
-# Espressif ESP32 Partition Table (2 MB flash, single app)
-# Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x1F0000,
+# Tabela de partições 2-OTA para flash de 4 MB (slots de app ~1.81 MB).
+# Name,     Type, SubType, Offset,    Size,     Flags
+nvs,        data, nvs,     0x9000,    0x6000,
+otadata,    data, ota,     0xf000,    0x2000,
+phy_init,   data, phy,     0x11000,   0x1000,
+ota_0,      app,  ota_0,   0x20000,   0x1D0000,
+ota_1,      app,  ota_1,   0x1F0000,  0x1D0000,

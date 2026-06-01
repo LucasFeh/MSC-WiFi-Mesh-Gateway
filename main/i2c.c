@@ -1,9 +1,13 @@
 #include "i2c.h"
 #include "driver/i2c.h"        /* API legada (não usar driver/i2c_slave.h) */
 #include "esp_log.h"
+#include "esp_system.h"        /* esp_restart() */
+#include "nvs.h"               /* preferences -> NVS */
 #include <string.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdio.h>             /* sscanf */
+#include <stdlib.h>            /* atoi */
 
 static const char *TAG = "I2C_SLAVE";
 
@@ -13,6 +17,21 @@ static const char *TAG = "I2C_SLAVE";
 uint8_t           i2c_macs[MAX_MACS][6];
 volatile int      i2c_mac_count = 0;
 SemaphoreHandle_t i2c_macs_mutex = NULL;
+
+/* --- Control surface: flags/estado setados pelos comandos recebidos via I2C.
+   Devem ser consumidos pela lógica da mesh/aplicação (ver i2c.h). --- */
+volatile bool RequestSendFlag      = false;
+volatile bool clearMacs            = false;
+volatile bool flagCommit           = false;
+volatile bool flagUnCommit         = false;
+volatile bool flagUniscastUpdate   = false;
+volatile bool flagUpdate           = false;
+volatile bool flagReboot           = false;
+volatile bool AP_FLAG              = false;
+volatile bool timerAdjust          = false;
+volatile int  seconds              = 0;
+char          numero[8]            = {0};   /* nº de série do comando UPDATE */
+char          updateUnicastMacStr[18] = {0};
 
 void i2c_slave_init(void)
 {
@@ -40,19 +59,97 @@ void i2c_slave_init(void)
              I2C_RX_BUF_SIZE, I2C_READ_TIMEOUT_MS);
 }
 
-/* Compara o conteúdo recebido com um comando ASCII, ignorando
-   espaços e terminadores (\0 \r \n \t e espaço) ao final. */
-static bool match_command(const uint8_t *buf, int len, const char *cmd)
+/* "AA:BB:CC:DD:EE:FF" -> 6 bytes. Retorna true em sucesso. */
+static bool parseMAC(const char *str, uint8_t out[6])
 {
-    while (len > 0) {
-        uint8_t c = buf[len - 1];
-        if (c == '\0' || c == '\r' || c == '\n' || c == '\t' || c == ' ')
-            len--;
-        else
-            break;
+    int v[6];
+    if (sscanf(str, "%x:%x:%x:%x:%x:%x",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+        return false;
     }
-    size_t cmd_len = strlen(cmd);
-    return ((size_t)len == cmd_len) && (memcmp(buf, cmd, cmd_len) == 0);
+    for (int i = 0; i < 6; i++) {
+        if (v[i] < 0 || v[i] > 0xFF) return false;
+        out[i] = (uint8_t)v[i];
+    }
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Dispatcher de comandos recebidos via I2C — porte da função onReceive() do
+ * firmware Arduino. A leitura do barramento é feita por i2c_slave_task(); aqui
+ * recebemos a string (null-terminada) já montada.
+ * ------------------------------------------------------------------------- */
+static void i2c_on_receive(const char *buffer)
+{
+    if (strcmp(buffer, "CLICKED") == 0) {
+        RequestSendFlag = true;
+        return;
+    }
+
+    if (strcmp(buffer, "CLEAR") == 0) {
+        clearMacs = true;
+        return;
+    }
+
+    if (strcmp(buffer, "COMMIT") == 0) {
+        RequestSendFlag = true;
+        flagCommit = true;
+        ESP_LOGI(TAG, "Commit!");
+        return;
+    }
+
+    if (strcmp(buffer, "UNCOMMIT") == 0) {
+        RequestSendFlag = true;
+        flagUnCommit = true;
+        ESP_LOGI(TAG, "Descomissionar!");
+        return;
+    }
+
+    if (strcmp(buffer, "RBOT_I2C") == 0) {
+        esp_restart();
+        return;
+    }
+
+    /* Ajuste do timer via "TIME:xx" */
+    if (strncmp(buffer, "TIME:", 5) == 0) {
+        seconds = atoi(buffer + 5);
+        if (seconds > 0) {
+            timerAdjust = true;
+            ESP_LOGI(TAG, "Request de ajuste do timer recebido: %d segundos", seconds);
+        } else {
+            ESP_LOGI(TAG, "Valor de tempo invalido");
+        }
+        return;
+    }
+
+    /* Caso contrário: interpreta como um MAC a adicionar à lista da mesh. */
+    uint8_t newMac[6];
+    if (!parseMAC(buffer, newMac)) {
+        ESP_LOGI(TAG, "MAC invalido");
+        return;
+    }
+
+    if (i2c_macs_mutex) xSemaphoreTake(i2c_macs_mutex, portMAX_DELAY);
+
+    for (int i = 0; i < i2c_mac_count; i++) {
+        if (memcmp(newMac, i2c_macs[i], 6) == 0) {
+            ESP_LOGI(TAG, "MAC ja existe");
+            if (i2c_macs_mutex) xSemaphoreGive(i2c_macs_mutex);
+            return;
+        }
+    }
+
+    if (i2c_mac_count < MAX_MACS) {
+        memcpy(i2c_macs[i2c_mac_count], newMac, 6);
+        /* TODO: SensorData[] não existe neste projeto. O original fazia:
+           memcpy(SensorData[macCount].MAC, newMac, 6); */
+        ESP_LOGI(TAG, "MAC %d armazenado: %s", i2c_mac_count, buffer);
+        i2c_mac_count++;
+    } else {
+        ESP_LOGI(TAG, "Limite de MACs atingido");
+    }
+
+    if (i2c_macs_mutex) xSemaphoreGive(i2c_macs_mutex);
 }
 
 void i2c_slave_task(void *arg)
@@ -81,16 +178,12 @@ void i2c_slave_task(void *arg)
         /* 1) Bytes em hexadecimal */
         ESP_LOG_BUFFER_HEX(TAG, rx_data, len);
 
-        /* 2) Conteúdo interpretado como string (não-imprimíveis viram '.') */
-        for (int i = 0; i < len; i++) {
-            printable[i] = isprint((unsigned char)rx_data[i]) ? (char)rx_data[i] : '.';
-        }
-        printable[len] = '\0';
-        ESP_LOGI(TAG, "Texto: \"%s\"", printable);
+        /* 2) Conteúdo recebido como string null-terminada (bytes crus) */
+        int n = (len < (int)sizeof(printable) - 1) ? len : (int)sizeof(printable) - 1;
+        memcpy(printable, rx_data, n);
+        printable[n] = '\0';
 
-        /* 3) Comando "iniciar" */
-        if (match_command(rx_data, len, "iniciar")) {
-            ESP_LOGW(TAG, ">>> Comando 'iniciar' reconhecido! Iniciando rotina. <<<");
-        }
+        /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino) */
+        i2c_on_receive(printable);
     }
 }
