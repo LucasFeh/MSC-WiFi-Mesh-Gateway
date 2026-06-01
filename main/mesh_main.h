@@ -49,7 +49,7 @@ extern bool is_mesh_connected;
 extern bool is_got_ip;
 
 /* Flags de sinalização RX → TX */
-extern volatile bool pending_read_broadcast;          /* root: precisa fazer broadcast */
+
 
 
 void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);

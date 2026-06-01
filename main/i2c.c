@@ -11,6 +11,10 @@
 
 static const char *TAG = "I2C_SLAVE";
 
+/* Sinalizado toda vez que um novo MAC é adicionado via I2C;
+   permite que a task de resposta pare de esperar e envie a lista. */
+static SemaphoreHandle_t mac_added_sem = NULL;
+
 /* Definições dos símbolos declarados como extern em i2c.h.
    São consumidos pela task TX da mesh (mesh_main.c); mantidos aqui
    para preservar o link, mesmo que esta versão não popule a lista. */
@@ -32,6 +36,7 @@ volatile bool flagUpdate           = false;
 volatile bool flagReboot           = false;
 volatile bool AP_FLAG              = false;
 volatile bool timerAdjust          = false;
+volatile bool flag_received        = false; /* para debug: sinaliza que chegou algo (mesmo que não tenhamos logado o conteúdo) */
 volatile int  seconds              = 0;
 char          numero[8]            = {0};   /* nº de série do comando UPDATE */
 char          updateUnicastMacStr[18] = {0};
@@ -41,6 +46,7 @@ void i2c_slave_init(void)
     ESP_LOGI(TAG, "Inicializando I2C slave (API legada driver/i2c.h)...");
 
     i2c_macs_mutex = xSemaphoreCreateMutex();
+    mac_added_sem    = xSemaphoreCreateBinary();
 
     i2c_config_t conf = {
         .mode                = I2C_MODE_SLAVE,
@@ -85,7 +91,7 @@ static bool parseMAC(const char *str, uint8_t out[6])
 static void i2c_on_receive(const char *buffer)
 {
     if (strcmp(buffer, "CLICKED") == 0) {
-        RequestSendFlag = true;
+        pending_read_broadcast = true;
         return;
     }
 
@@ -94,8 +100,7 @@ static void i2c_on_receive(const char *buffer)
     }
 
     if (strcmp(buffer, "COMMIT") == 0) {
-        RequestSendFlag = true;
-        flagCommit = true;
+        pending_read_broadcast = true;
         return;
     }
 
@@ -146,6 +151,8 @@ static void i2c_on_receive(const char *buffer)
         memset(&i2c_readings[i2c_mac_count], 0, sizeof(i2c_readings[0]));
         ESP_LOGI(TAG, "MAC %d armazenado: %s", i2c_mac_count, buffer);
         i2c_mac_count++;
+        /* Avisa a task de resposta que chegou pelo menos um MAC. */
+        if (mac_added_sem) xSemaphoreGive(mac_added_sem);
     } else {
         ESP_LOGI(TAG, "Limite de MACs atingido");
     }
@@ -306,34 +313,33 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
    de I2C_REQUEST_STRIDE, preservando o alinhamento do FIFO. */
 void i2c_slave_request_task(void *arg)
 {
-    static uint8_t blob[I2C_REQUEST_BLOB_MAX];   /* .bss, não pesa na pilha da task */
-    uint32_t blobs = 0;
+    static uint8_t blob[I2C_REQUEST_BLOB_MAX];
 
-    ESP_LOGI(TAG, "Task de resposta I2C (slave->master) iniciada (FIFO=%d registros)",
-             I2C_TX_DEPTH_RECORDS);
+    ESP_LOGI(TAG, "Task de resposta I2C iniciada");
 
     while (1) {
+
         size_t len = i2c_build_request_blob(blob, sizeof(blob));
 
-        /* Entrega registro a registro; cada escrita de 72 bytes é atômica
-           (all-or-nothing no ring buffer), então o FIFO sempre contém registros
-           inteiros e alinhados. portMAX_DELAY: bloqueia até liberar espaço. */
+        /* Envia cada registro ao FIFO TX (portMAX_DELAY bloqueia se cheio). */
         for (size_t off = 0; off + I2C_REQUEST_STRIDE <= len; off += I2C_REQUEST_STRIDE) {
             int w = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob + off,
                                            I2C_REQUEST_STRIDE, portMAX_DELAY);
             if (w != I2C_REQUEST_STRIDE) {
-                ESP_LOGE(TAG, "Escrita TX incompleta (%d), refaz o blob", w);
-                break;   /* não avança: recomeça com blob limpo p/ não desalinhar */
+                ESP_LOGE(TAG, "Escrita TX incompleta (%d)", w);
+                break;
             }
         }
 
-        /* Log periódico (a cada 10 blobs) só para confirmar a atividade slave->master.
-           Lembre: não há como logar "por requestFrom" — o driver legado não notifica
-           reads do master (servidos pelo hardware a partir do FIFO). */
-        if ((++blobs % 10) == 0) {
-            ESP_LOGI(TAG, "onRequest: %u blob(s) servido(s) (%d registro(s)/blob)",
-                     (unsigned)blobs, (int)(len / I2C_REQUEST_STRIDE));
+        if (i2c_mac_count == 0) {
+            /* Lista vazia: "Vazio" foi enviado UMA vez.
+               Aguarda até 5 s pelo master empurrar MACs via I2C write.
+               - Se chegarem MACs: xSemaphoreGive acorda esta task imediatamente.
+               - Se o timeout estourar: reenvia "Vazio" e espera de novo. */
+            ESP_LOGI(TAG, "Aguardando MACs do master (timeout 5 s)...");
+            xSemaphoreTake(mac_added_sem, pdMS_TO_TICKS(5000));
         }
+        /* Se count > 0: volta ao topo imediatamente para servir o próximo blob. */
     }
 }
 
@@ -356,6 +362,8 @@ void i2c_slave_task(void *arg)
             /* Nenhum dado dentro do timeout: volta a aguardar. */
             continue;
         }
+
+        i2c_on_receive(""); /* sinaliza que chegou algo, mesmo que não loguemos o conteúdo (ex: leitura parcial >0 mas <len) */
 
         /* ---- Dados válidos recebidos (len > 0) ---- */
         ESP_LOGI(TAG, "Recebido %d byte(s) do master:", len);

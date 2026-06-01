@@ -23,13 +23,13 @@
    um registro por leitura sem precisar de callback. */
 #define I2C_REQUEST_STRIDE   72
 
-/* Profundidade do ring buffer TX em REGISTROS. A task escreve um registro por vez
-   e bloqueia quando cheio (backpressure por-registro), de modo que o atraso entre
-   um dado novo e o que o master lê fica limitado a ~esta quantidade de leituras —
-   independente do tamanho da lista. Mantê-lo PEQUENO evita acumular cópias velhas
-   do blob na fila (era a causa do "Vazio" repetido no boot). Alguns registros de
-   folga evitam underrun do FIFO de hardware sob carga. */
-#define I2C_TX_DEPTH_RECORDS 8
+/* Profundidade do ring buffer TX em REGISTROS. A task de resposta escreve UM
+   registro por vez (no máximo I2C_REQUEST_STRIDE bytes) e só avança para o próximo
+   depois que o master leu o anterior — "uma leitura por escrita". Mantê-lo pequeno
+   (2 registros) impede o acúmulo de cópias na fila, que era o que fazia o master
+   ler "Vazio" várias vezes seguidas. 2 (e não 1) dá folga para o ring buffer aceitar
+   sempre uma escrita de 72 bytes e para o FIFO de hardware não sofrer underrun. */
+#define I2C_TX_DEPTH_RECORDS 2
 #define I2C_TX_BUF_SIZE      (I2C_TX_DEPTH_RECORDS * I2C_REQUEST_STRIDE)
 
 /* Maior blob possível montado de uma vez: um registro por MAC + o sentinela "FIM". */
@@ -41,6 +41,7 @@ extern uint8_t           i2c_macs[MAX_MACS][6];
 extern volatile int      i2c_mac_count;
 extern SemaphoreHandle_t i2c_macs_mutex;
 
+extern volatile bool pending_read_broadcast;  
 /* Leituras de mesh por-MAC (alinhadas por índice com i2c_macs[]), consumidas pelo
    onRequest I2C. Populadas no RX da mesh (BIN_MSG_READ_RESPONSE); rTCounter conta
    ciclos de broadcast sem resposta — ao atingir 3 o sensor é reportado zerado.
