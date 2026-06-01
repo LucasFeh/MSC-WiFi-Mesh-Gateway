@@ -23,10 +23,17 @@
    um registro por leitura sem precisar de callback. */
 #define I2C_REQUEST_STRIDE   72
 
-/* buffer de transmissão (exigido > 0 no modo slave): precisa caber todos os MACs
-   + o sentinela "FIM", cada um com I2C_REQUEST_STRIDE bytes, com folga para o
-   overhead do ring buffer do driver. */
-#define I2C_TX_BUF_SIZE      (((MAX_MACS + 1) * I2C_REQUEST_STRIDE) + 256)
+/* Profundidade do ring buffer TX em REGISTROS. A task escreve um registro por vez
+   e bloqueia quando cheio (backpressure por-registro), de modo que o atraso entre
+   um dado novo e o que o master lê fica limitado a ~esta quantidade de leituras —
+   independente do tamanho da lista. Mantê-lo PEQUENO evita acumular cópias velhas
+   do blob na fila (era a causa do "Vazio" repetido no boot). Alguns registros de
+   folga evitam underrun do FIFO de hardware sob carga. */
+#define I2C_TX_DEPTH_RECORDS 8
+#define I2C_TX_BUF_SIZE      (I2C_TX_DEPTH_RECORDS * I2C_REQUEST_STRIDE)
+
+/* Maior blob possível montado de uma vez: um registro por MAC + o sentinela "FIM". */
+#define I2C_REQUEST_BLOB_MAX ((MAX_MACS + 1) * I2C_REQUEST_STRIDE)
 
 /* Lista de MACs compartilhada com a task TX da mesh (mesh_main.c).
    Mantida aqui para preservar o link com o restante do firmware. */

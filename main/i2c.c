@@ -229,38 +229,42 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
     return off;
 }
 
-/* Task dedicada do caminho slave -> master. Mantém o ring buffer TX cheio com o
-   blob atual (MACs+leituras + "FIM"). i2c_slave_write_buffer bloqueia quando o
-   buffer está cheio (master sem drenar/ocioso), de modo que: (a) não há busy-wait,
-   (b) a idade dos dados fica limitada a ~1 ciclo de leitura, (c) a escrita é sempre
-   do blob inteiro (múltiplo de I2C_REQUEST_STRIDE), preservando o alinhamento do FIFO. */
+/* Task dedicada do caminho slave -> master. Monta o blob atual (MACs+leituras +
+   "FIM") e o entrega ao ring buffer TX UM REGISTRO POR VEZ, bloqueando por-registro
+   quando o buffer está cheio. Esse backpressure fino: (a) não tem busy-wait,
+   (b) limita o atraso a ~I2C_TX_DEPTH_RECORDS leituras — evitando o acúmulo de
+   blobs velhos na fila (causa do "Vazio" repetido), (c) escreve sempre múltiplos
+   de I2C_REQUEST_STRIDE, preservando o alinhamento do FIFO. */
 void i2c_slave_request_task(void *arg)
 {
-    static uint8_t blob[I2C_TX_BUF_SIZE];   /* .bss, não pesa na pilha da task */
-    uint32_t cycles = 0;
+    static uint8_t blob[I2C_REQUEST_BLOB_MAX];   /* .bss, não pesa na pilha da task */
+    uint32_t blobs = 0;
 
-    ESP_LOGI(TAG, "Task de resposta I2C (slave->master) iniciada");
+    ESP_LOGI(TAG, "Task de resposta I2C (slave->master) iniciada (FIFO=%d registros)",
+             I2C_TX_DEPTH_RECORDS);
 
     while (1) {
         size_t len = i2c_build_request_blob(blob, sizeof(blob));
 
-        /* Timeout finito: se o buffer estiver cheio (master ocioso), re-tenta no
-           próximo loop com dados frescos, sem avançar nada (mantém alinhamento). */
-        int written = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob, (int)len,
-                                             pdMS_TO_TICKS(200));
-
-        if (written == (int)len) {
-            /* Um blob inteiro foi entregue ao FIFO = ~um ciclo de poll do master.
-               Log periódico (a cada 10 ciclos) para confirmar a atividade sem poluir. */
-            if ((++cycles % 10) == 0) {
-                ESP_LOGI(TAG, "onRequest: %u ciclo(s) servido(s) ao master (%d registro(s)/ciclo)",
-                         (unsigned)cycles, (int)(len / I2C_REQUEST_STRIDE));
+        /* Entrega registro a registro; cada escrita de 72 bytes é atômica
+           (all-or-nothing no ring buffer), então o FIFO sempre contém registros
+           inteiros e alinhados. portMAX_DELAY: bloqueia até liberar espaço. */
+        for (size_t off = 0; off + I2C_REQUEST_STRIDE <= len; off += I2C_REQUEST_STRIDE) {
+            int w = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob + off,
+                                           I2C_REQUEST_STRIDE, portMAX_DELAY);
+            if (w != I2C_REQUEST_STRIDE) {
+                ESP_LOGE(TAG, "Escrita TX incompleta (%d), refaz o blob", w);
+                break;   /* não avança: recomeça com blob limpo p/ não desalinhar */
             }
-        } else if (written < 0) {
-            ESP_LOGE(TAG, "Falha ao escrever resposta no TX (%d)", written);
-            vTaskDelay(pdMS_TO_TICKS(100));
         }
-        /* written == 0: buffer cheio dentro do timeout; segue o loop. */
+
+        /* Log periódico (a cada 10 blobs) só para confirmar a atividade slave->master.
+           Lembre: não há como logar "por requestFrom" — o driver legado não notifica
+           reads do master (servidos pelo hardware a partir do FIFO). */
+        if ((++blobs % 10) == 0) {
+            ESP_LOGI(TAG, "onRequest: %u blob(s) servido(s) (%d registro(s)/blob)",
+                     (unsigned)blobs, (int)(len / I2C_REQUEST_STRIDE));
+        }
     }
 }
 

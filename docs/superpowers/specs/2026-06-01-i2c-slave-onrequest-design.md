@@ -61,15 +61,20 @@ onRequest"** — os reads do master são servidos pelo hardware sem notificar o 
 Arduino original também não dependia de `RequestSendFlag`). Logo, a resposta NÃO pode ser
 gatilhada por `RequestSendFlag` — ela precisa estar **sempre disponível**.
 
-**Solução (streaming por FIFO com stride fixo + reabastecimento contínuo):** uma task
-dedicada (`i2c_slave_request_task`) mantém o ring buffer TX cheio com o blob atual —
-**todos** os registros, **cada um com padding `0xFF` até exatos 72 bytes**, terminando
-com `"FIM"` (lista vazia → `"Vazio"` + `"FIM"`). Cada `requestFrom(72)` drena 72 bytes do
-FIFO → o master recebe **1 registro por read**, avançando sozinho. A paginação do
-`sendWireIndex` do Arduino vira o **avanço natural do ponteiro do FIFO**. O `i2c_slave_write_buffer`
-**bloqueia quando o buffer está cheio** (master ocioso): isso pausa a task sem busy-wait e
-limita a idade dos dados a ~1 ciclo de poll. Escrever sempre o blob inteiro (múltiplo de 72)
-preserva o alinhamento. Sem callback e sem mexer no master.
+**Solução (streaming por FIFO com stride fixo + reabastecimento por-registro):** uma task
+dedicada (`i2c_slave_request_task`) monta o blob atual — **todos** os registros, **cada um
+com padding `0xFF` até exatos 72 bytes**, terminando com `"FIM"` (lista vazia → `"Vazio"` +
+`"FIM"`) — e o entrega ao ring buffer TX **um registro por vez**. Cada `requestFrom(72)`
+drena 72 bytes do FIFO → o master recebe **1 registro por read**, avançando sozinho. A
+paginação do `sendWireIndex` do Arduino vira o **avanço natural do ponteiro do FIFO**.
+
+**Profundidade do FIFO é crítica:** o ring buffer TX é dimensionado em poucos REGISTROS
+(`I2C_TX_DEPTH_RECORDS`, ex.: 8). A escrita por-registro **bloqueia quando cheia**
+(backpressure fino, sem busy-wait) e limita o atraso a ~`I2C_TX_DEPTH_RECORDS` leituras —
+**independente do tamanho da lista**. Um ring buffer GRANDE relativo ao blob acumularia
+muitas cópias velhas na fila (no boot, ~`buffer/blob` cópias de `"Vazio"`), fazendo o master
+ler `"Vazio"` por vários segundos antes de alcançar os dados frescos — bug observado e
+corrigido. Cada escrita de 72 bytes é atômica no ring buffer, preservando o alinhamento.
 
 Migrar para o driver novo `driver/i2c_slave.h` (que tem callback `on_request`) foi
 **descartado**: o projeto proíbe esse driver explicitamente (comentário em `i2c.c`).
