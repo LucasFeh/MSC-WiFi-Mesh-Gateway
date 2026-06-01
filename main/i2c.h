@@ -13,16 +13,40 @@
 #define I2C_SLAVE_ADDR       0x08   /* endereço de 7 bits */
 
 #define I2C_RX_BUF_SIZE      256    /* buffer de recepção do driver (bytes) */
-#define I2C_TX_BUF_SIZE      256    /* buffer de transmissão (exigido > 0 no modo slave) */
 #define I2C_READ_TIMEOUT_MS  100    /* timeout de leitura da task dedicada */
 
 #define MAX_MACS             34
+
+/* Caminho slave -> master (onRequest): o master fixo lê I2C_REQUEST_STRIDE bytes
+   por requestFrom e descarta padding 0xFF/0x8f. Cada registro (1 JSON, "Vazio"
+   ou "FIM") é emitido com exatamente esse stride, de modo que o FIFO TX entregue
+   um registro por leitura sem precisar de callback. */
+#define I2C_REQUEST_STRIDE   72
+
+/* buffer de transmissão (exigido > 0 no modo slave): precisa caber todos os MACs
+   + o sentinela "FIM", cada um com I2C_REQUEST_STRIDE bytes, com folga para o
+   overhead do ring buffer do driver. */
+#define I2C_TX_BUF_SIZE      (((MAX_MACS + 1) * I2C_REQUEST_STRIDE) + 256)
 
 /* Lista de MACs compartilhada com a task TX da mesh (mesh_main.c).
    Mantida aqui para preservar o link com o restante do firmware. */
 extern uint8_t           i2c_macs[MAX_MACS][6];
 extern volatile int      i2c_mac_count;
 extern SemaphoreHandle_t i2c_macs_mutex;
+
+/* Leituras de mesh por-MAC (alinhadas por índice com i2c_macs[]), consumidas pelo
+   onRequest I2C. Populadas no RX da mesh (BIN_MSG_READ_RESPONSE); rTCounter conta
+   ciclos de broadcast sem resposta — ao atingir 3 o sensor é reportado zerado.
+   Protegidas pelo mesmo i2c_macs_mutex. */
+typedef struct {
+    uint8_t ch1;
+    uint8_t ch2;
+    uint8_t ch3;
+    uint8_t tensao;      /* sem campo na mesh ainda: mantido em 0 */
+    uint8_t rTCounter;   /* staleness: 0 = leitura fresca, >=3 = offline */
+} i2c_reading_t;
+
+extern i2c_reading_t i2c_readings[MAX_MACS];
 
 /* --- Control surface: flags/estado setados pelos comandos I2C (i2c_on_receive).
    Devem ser lidos/consumidos pela lógica da mesh/aplicação. --- */

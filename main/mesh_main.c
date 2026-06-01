@@ -178,7 +178,25 @@ void esp_mesh_p2p_rx_main(void *arg)
                     mac_to_str(from.addr, from_str);
                     ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d", from_str, resp->ch1, resp->ch2, resp->ch3);
                     post_reading_to_flask(from_str, resp->ch1, resp->ch2, resp->ch3);
-                
+
+                    /* Atualiza o store consumido pelo onRequest I2C (slave -> master):
+                       casa o remetente com a lista i2c_macs[] e grava a leitura fresca,
+                       zerando o contador de staleness. */
+                    if (i2c_macs_mutex &&
+                        xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        for (int i = 0; i < i2c_mac_count; i++) {
+                            if (memcmp(from.addr, i2c_macs[i], 6) == 0) {
+                                i2c_readings[i].ch1       = resp->ch1;
+                                i2c_readings[i].ch2       = resp->ch2;
+                                i2c_readings[i].ch3       = resp->ch3;
+                                i2c_readings[i].tensao    = 0;   /* sem tensão na mesh ainda */
+                                i2c_readings[i].rTCounter = 0;   /* resposta recebida: fresca */
+                                break;
+                            }
+                        }
+                        xSemaphoreGive(i2c_macs_mutex);
+                    }
+
                     break;
 
                 case BIN_MSG_STATUS:
@@ -217,6 +235,12 @@ void esp_mesh_p2p_tx_main(void *arg)
             if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 local_count = i2c_mac_count;
                 memcpy(local_macs, i2c_macs, local_count * 6);
+                /* Cada ciclo de broadcast conta como uma "tentativa". O contador é
+                   zerado quando a resposta chega (ver RX); ao atingir 3 o onRequest
+                   passa a reportar leituras zeradas (sensor offline). */
+                for (int i = 0; i < local_count; i++) {
+                    if (i2c_readings[i].rTCounter < 3) i2c_readings[i].rTCounter++;
+                }
                 xSemaphoreGive(i2c_macs_mutex);
             }
 

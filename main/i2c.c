@@ -18,6 +18,10 @@ uint8_t           i2c_macs[MAX_MACS][6];
 volatile int      i2c_mac_count = 0;
 SemaphoreHandle_t i2c_macs_mutex = NULL;
 
+/* Leituras por-MAC consumidas pelo onRequest (slave -> master). Populadas no RX
+   da mesh; ver i2c.h. */
+i2c_reading_t     i2c_readings[MAX_MACS] = {0};
+
 /* --- Control surface: flags/estado setados pelos comandos recebidos via I2C.
    Devem ser consumidos pela lógica da mesh/aplicação (ver i2c.h). --- */
 volatile bool RequestSendFlag      = false;
@@ -139,8 +143,9 @@ static void i2c_on_receive(const char *buffer)
 
     if (i2c_mac_count < MAX_MACS) {
         memcpy(i2c_macs[i2c_mac_count], newMac, 6);
-        /* TODO: SensorData[] não existe neste projeto. O original fazia:
-           memcpy(SensorData[macCount].MAC, newMac, 6); */
+        /* Slot de leitura zerado até a primeira resposta da mesh (porte do
+           SensorData[macCount] do firmware Arduino). */
+        memset(&i2c_readings[i2c_mac_count], 0, sizeof(i2c_readings[0]));
         ESP_LOGI(TAG, "MAC %d armazenado: %s", i2c_mac_count, buffer);
         i2c_mac_count++;
     } else {
@@ -148,6 +153,94 @@ static void i2c_on_receive(const char *buffer)
     }
 
     if (i2c_macs_mutex) xSemaphoreGive(i2c_macs_mutex);
+}
+
+/* ---------------------------------------------------------------------------
+ * Caminho slave -> master (porte do onRequest() do firmware Arduino).
+ *
+ * O driver legado (driver/i2c.h) NÃO tem callback de "master read": pré-carrega-se
+ * um ring buffer TX com i2c_slave_write_buffer() e o hardware o drena conforme o
+ * master clocka os bytes. O master fixo faz requestFrom(addr, I2C_REQUEST_STRIDE)
+ * em loop, descartando os bytes de padding 0xFF/0x8f, e para ao ler "FIM".
+ *
+ * Como o ring buffer é FIFO e persiste entre transações, emitimos cada registro
+ * (1 JSON, "Vazio" ou "FIM") com EXATAMENTE I2C_REQUEST_STRIDE bytes. Assim cada
+ * requestFrom drena um registro, reproduzindo o sendWireIndex++ do Arduino sem
+ * precisar de callback. O ACK/NACK por byte é feito pelo hardware do periférico.
+ * ------------------------------------------------------------------------- */
+
+/* Escreve 'text' no offset 'off' do blob e completa o registro com padding 0xFF
+   (descartado pelo master) até I2C_REQUEST_STRIDE. Retorna o novo offset. */
+static size_t i2c_emit_record(uint8_t *blob, size_t off, const char *text)
+{
+    size_t tlen = strlen(text);
+    if (tlen > I2C_REQUEST_STRIDE) tlen = I2C_REQUEST_STRIDE;   /* trava de segurança */
+    memcpy(blob + off, text, tlen);
+    memset(blob + off + tlen, 0xFF, I2C_REQUEST_STRIDE - tlen);
+    return off + I2C_REQUEST_STRIDE;
+}
+
+/* Serializa a lista atual de MACs+leituras no blob (um registro por MAC, depois
+   "FIM"; lista vazia -> "Vazio" + "FIM"). Retorna o tamanho total escrito. */
+static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
+{
+    size_t off = 0;
+    char   rec[I2C_REQUEST_STRIDE + 1];
+
+    if (i2c_macs_mutex) xSemaphoreTake(i2c_macs_mutex, portMAX_DELAY);
+
+    int count = i2c_mac_count;
+    if (count <= 0) {
+        off = i2c_emit_record(blob, off, "Vazio");
+    } else {
+        for (int i = 0; i < count && off + I2C_REQUEST_STRIDE <= cap; i++) {
+            uint8_t ch1 = i2c_readings[i].ch1;
+            uint8_t ch2 = i2c_readings[i].ch2;
+            uint8_t ch3 = i2c_readings[i].ch3;
+            uint8_t tensao = i2c_readings[i].tensao;
+
+            /* Sem resposta há >=3 ciclos de broadcast: sensor offline -> zeros
+               (porte do "if (rTCounter == 3)" do onRequest Arduino). */
+            if (i2c_readings[i].rTCounter >= 3) {
+                ch1 = ch2 = ch3 = tensao = 0;
+            }
+
+            snprintf(rec, sizeof(rec),
+                     "{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+                     "\"ch1\":%u,\"ch2\":%u,\"ch3\":%u,\"tensao\":%u}",
+                     i2c_macs[i][0], i2c_macs[i][1], i2c_macs[i][2],
+                     i2c_macs[i][3], i2c_macs[i][4], i2c_macs[i][5],
+                     (unsigned)ch1, (unsigned)ch2, (unsigned)ch3, (unsigned)tensao);
+            off = i2c_emit_record(blob, off, rec);
+        }
+    }
+
+    if (i2c_macs_mutex) xSemaphoreGive(i2c_macs_mutex);
+
+    /* Sentinela final: o master encerra o loop de leitura ao receber "FIM". */
+    if (off + I2C_REQUEST_STRIDE <= cap) {
+        off = i2c_emit_record(blob, off, "FIM");
+    }
+    return off;
+}
+
+/* Monta a resposta e a pré-carrega no ring buffer TX do driver. Chamada na própria
+   task I2C logo após o comando que setou RequestSendFlag, ou seja, antes de o master
+   iniciar o requestFrom — o que evita corrida na primeira leitura. */
+static void i2c_load_request_response(void)
+{
+    static uint8_t blob[I2C_TX_BUF_SIZE];   /* .bss, não pesa na pilha da task */
+
+    size_t len = i2c_build_request_blob(blob, sizeof(blob));
+    int written = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob, (int)len,
+                                         pdMS_TO_TICKS(I2C_READ_TIMEOUT_MS));
+
+    if (written < 0) {
+        ESP_LOGE(TAG, "Falha ao carregar resposta no TX (%d)", written);
+        return;
+    }
+    ESP_LOGI(TAG, "Resposta a master read carregada: %d/%u byte(s), %d registro(s)",
+             written, (unsigned)len, (int)(len / I2C_REQUEST_STRIDE));
 }
 
 void i2c_slave_task(void *arg)
@@ -182,8 +275,15 @@ void i2c_slave_task(void *arg)
         printable[n] = '\0';
 
         /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino) */
-        
         ESP_LOGI(TAG, "Texto:  %s", printable);
         i2c_on_receive(printable);
+
+        /* 4) Caminho slave -> master: se o comando pediu envio (CLICKED/COMMIT/
+           UNCOMMIT setam RequestSendFlag), pré-carrega a resposta AGORA — antes de
+           o master iniciar o requestFrom (porte do onRequest Arduino). */
+        if (RequestSendFlag) {
+            RequestSendFlag = false;
+            i2c_load_request_response();
+        }
     }
 }
