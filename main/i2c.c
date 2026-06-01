@@ -25,7 +25,6 @@ i2c_reading_t     i2c_readings[MAX_MACS] = {0};
 /* --- Control surface: flags/estado setados pelos comandos recebidos via I2C.
    Devem ser consumidos pela lógica da mesh/aplicação (ver i2c.h). --- */
 volatile bool RequestSendFlag      = false;
-volatile bool clearMacs            = false;
 volatile bool flagCommit           = false;
 volatile bool flagUnCommit         = false;
 volatile bool flagUniscastUpdate   = false;
@@ -91,7 +90,6 @@ static void i2c_on_receive(const char *buffer)
     }
 
     if (strcmp(buffer, "CLEAR") == 0) {
-        clearMacs = true;
         return;
     }
 
@@ -153,6 +151,77 @@ static void i2c_on_receive(const char *buffer)
     }
 
     if (i2c_macs_mutex) xSemaphoreGive(i2c_macs_mutex);
+}
+
+/* Os 17 chars a partir de 's' formam um MAC "HH:HH:HH:HH:HH:HH"? */
+static bool i2c_is_mac_token(const char *s)
+{
+    for (int i = 0; i < 17; i++) {
+        char c = s[i];
+        if (c == '\0') return false;
+        if (i == 2 || i == 5 || i == 8 || i == 11 || i == 14) {
+            if (c != ':') return false;            /* separadores nas posições fixas */
+        } else if (!isxdigit((unsigned char)c)) {
+            return false;                          /* demais posições: dígito hex */
+        }
+    }
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Framing RX: o driver legado NÃO preserva fronteiras de STOP do I2C — ele
+ * concatena no ring buffer tudo que chegou dentro da janela de leitura. O master
+ * envia mensagens coladas, sem delimitador. Como os MACs têm formato fixo de 17
+ * chars e os comandos são palavras-chave, fatiamos o buffer aqui e despachamos
+ * cada mensagem isoladamente para i2c_on_receive() (que espera uma por vez).
+ * ------------------------------------------------------------------------- */
+static void i2c_split_and_dispatch(const char *buffer)
+{
+    static const char *kw[] = { "CLICKED", "UNCOMMIT", "COMMIT", "CLEAR", "RBOT_I2C" };
+    const char *p = buffer;
+    char token[32];
+
+    while (*p) {
+        bool matched = false;
+
+        /* 1) Palavra-chave conhecida (comandos são alfabéticos; não colidem com MAC). */
+        for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) {
+            size_t klen = strlen(kw[i]);
+            if (strncmp(p, kw[i], klen) == 0) {
+                i2c_on_receive(kw[i]);
+                p += klen;
+                matched = true;
+                break;
+            }
+        }
+        if (matched) continue;
+
+        /* 2) "TIME:<dígitos>" */
+        if (strncmp(p, "TIME:", 5) == 0) {
+            const char *q = p + 5;
+            while (isdigit((unsigned char)*q)) q++;
+            size_t tlen = (size_t)(q - p);
+            if (tlen < sizeof(token)) {
+                memcpy(token, p, tlen);
+                token[tlen] = '\0';
+                i2c_on_receive(token);
+            }
+            p = q;
+            continue;
+        }
+
+        /* 3) MAC de 17 chars. */
+        if (i2c_is_mac_token(p)) {
+            memcpy(token, p, 17);
+            token[17] = '\0';
+            i2c_on_receive(token);
+            p += 17;
+            continue;
+        }
+
+        /* 4) Byte não reconhecido: avança 1 (defensivo, evita laço infinito). */
+        p++;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -299,11 +368,10 @@ void i2c_slave_task(void *arg)
         memcpy(printable, rx_data, n);
         printable[n] = '\0';
 
-        /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino).
-           A resposta ao master (caminho slave -> master) é servida continuamente por
-           i2c_slave_request_task(), independente de comando — o master fixo faz poll
-           contínuo. RequestSendFlag permanece como sinal de controle (mesh). */
+        /* 3) Fatia o buffer em mensagens (o driver pode ter concatenado várias
+           escritas do master) e despacha cada uma. A resposta ao master é servida
+           continuamente por i2c_slave_request_task(), independente de comando. */
         ESP_LOGI(TAG, "Texto:  %s", printable);
-        i2c_on_receive(printable);
+        i2c_split_and_dispatch(printable);
     }
 }

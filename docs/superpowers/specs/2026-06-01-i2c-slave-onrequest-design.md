@@ -132,6 +132,21 @@ mesh node --READ_RESPONSE-->  esp_mesh_p2p_rx_main -> grava i2c_readings[idx] (m
 broadcast  READ_REQUEST    ->  esp_mesh_p2p_tx_main -> rTCounter++ (mutex, cap 3)
 ```
 
+## Framing RX (master → slave)
+
+O driver legado **não preserva fronteiras de STOP do I2C**: ele acumula no ring buffer
+RX tudo que chega dentro da janela de leitura. O master envia mensagens **coladas, sem
+delimitador** (ex.: vários MACs + `TIME:60` numa só leitura). Sem separar, `parseMAC`
+falha (o último campo de um MAC gruda no primeiro do seguinte → valor > 0xFF).
+
+`i2c_split_and_dispatch()` fatia o buffer por **formato fixo**: palavras-chave conhecidas
+(`CLICKED`, `COMMIT`, `UNCOMMIT`, `CLEAR`, `RBOT_I2C` — alfabéticas, não colidem com MAC),
+`TIME:<dígitos>`, e MAC de 17 chars `HH:HH:HH:HH:HH:HH`. Cada token é despachado isolado
+para `i2c_on_receive()`. Limitações: depende do formato fixo de 17 chars do MAC e do
+conjunto de palavras-chave; comandos não previstos (ex.: UPDATE/OPDATEUNICAST) são
+ignorados (também não tratados por `i2c_on_receive` hoje). Separar de verdade por
+transação exigiria o driver novo `driver/i2c_slave.h` (proibido no projeto).
+
 ## Tratamento de erros / casos de borda
 - **Lista vazia:** blob = `"Vazio"` + `"FIM"`. Master chama `commit()` então para.
 - **Corrida 1º read:** load é síncrono na task I2C após o comando; master tolera read vazio.
