@@ -54,12 +54,22 @@ Arduino, onde `onRequest()` dispara síncrono por read). Em vez disso, pré-carr
 **ring buffer TX** com `i2c_slave_write_buffer()`; o hardware drena conforme o master lê.
 O ring buffer é **FIFO e persiste entre transações de read**.
 
-**Solução (streaming por FIFO com stride fixo):** quando `RequestSendFlag` é setada,
-o slave serializa **todos** os registros, **cada um com padding `0xFF` até exatos 72 bytes**,
-concatenados, terminando com `"FIM"`; se a lista estiver vazia, `"Vazio"` + `"FIM"`.
-Como cada `requestFrom(72)` drena 72 bytes do FIFO, o master recebe exatamente **1 registro
-por read**, avançando sozinho pela lista. A paginação do `sendWireIndex` do Arduino vira o
-**avanço natural do ponteiro do FIFO** — sem callback e sem mexer no master.
+**Importante:** como não há callback de read, **é impossível imprimir algo "a cada
+onRequest"** — os reads do master são servidos pelo hardware sem notificar o software.
+
+**O master faz poll contínuo** (loop de `requestFrom` sem escrever antes; o `onRequest`
+Arduino original também não dependia de `RequestSendFlag`). Logo, a resposta NÃO pode ser
+gatilhada por `RequestSendFlag` — ela precisa estar **sempre disponível**.
+
+**Solução (streaming por FIFO com stride fixo + reabastecimento contínuo):** uma task
+dedicada (`i2c_slave_request_task`) mantém o ring buffer TX cheio com o blob atual —
+**todos** os registros, **cada um com padding `0xFF` até exatos 72 bytes**, terminando
+com `"FIM"` (lista vazia → `"Vazio"` + `"FIM"`). Cada `requestFrom(72)` drena 72 bytes do
+FIFO → o master recebe **1 registro por read**, avançando sozinho. A paginação do
+`sendWireIndex` do Arduino vira o **avanço natural do ponteiro do FIFO**. O `i2c_slave_write_buffer`
+**bloqueia quando o buffer está cheio** (master ocioso): isso pausa a task sem busy-wait e
+limita a idade dos dados a ~1 ciclo de poll. Escrever sempre o blob inteiro (múltiplo de 72)
+preserva o alinhamento. Sem callback e sem mexer no master.
 
 Migrar para o driver novo `driver/i2c_slave.h` (que tem callback `on_request`) foi
 **descartado**: o projeto proíbe esse driver explicitamente (comentário em `i2c.c`).
@@ -84,9 +94,10 @@ Migrar para o driver novo `driver/i2c_slave.h` (que tem callback `on_request`) f
   Retorna o tamanho total no buffer estático do módulo.
 - **`i2c_load_request_response()`** (estático): chama o build, depois um único
   `i2c_slave_write_buffer(I2C_SLAVE_PORT, blob, len, timeout)`; loga bytes carregados.
-- **`i2c_slave_task()`**: após `i2c_on_receive(printable)`, se `RequestSendFlag` estiver
-  setada → `i2c_load_request_response()` e limpa `RequestSendFlag`. (Mesma task → o blob
-  fica pronto antes do primeiro `requestFrom` do master, eliminando a corrida.)
+- **`i2c_slave_request_task()` (task dedicada, criada no `app_main`)**: loop infinito que
+  reconstrói o blob e o escreve inteiro no ring buffer TX com `i2c_slave_write_buffer`
+  (timeout finito; bloqueio natural quando cheio). Log periódico (a cada 10 ciclos) confirma
+  a atividade slave→master. `RequestSendFlag` deixa de gatilhar a resposta (poll é contínuo).
 - Comentários explicando o fluxo slave→master e que **ACK/NACK é feito por hardware**
   no driver legado (nenhuma ação manual necessária).
 
@@ -105,14 +116,12 @@ Migrar para o driver novo `driver/i2c_slave.h` (que tem callback `on_request`) f
 ## Fluxo de dados
 
 ```
-Master  --escreve "CLICKED"-->  i2c_slave_task (i2c_slave_read_buffer)
-                                  -> i2c_on_receive -> RequestSendFlag=true
-                                  -> i2c_load_request_response()
-                                       -> build blob (macs + i2c_readings, padding 0xFF/72)
-                                       -> i2c_slave_write_buffer (TX ring FIFO)
-Master  --requestFrom(72) xN-->  HW drena 72B/registro do FIFO
+i2c_slave_request_task (loop)  -> build blob (macs + i2c_readings, padding 0xFF/72 + FIM)
+                                -> i2c_slave_write_buffer (TX ring FIFO; bloqueia se cheio)
+Master  --requestFrom(72) xN-->  HW drena 72B/registro do FIFO (contínuo)
                                   -> master limpa 0xFF/0x8f, parseia 1 JSON por read
-                                  -> para em "FIM"
+                                  -> para em "FIM", reinicia o poll
+Master  --escreve "CLICKED"-->  i2c_slave_task -> i2c_on_receive (comandos; flags de controle)
 
 mesh node --READ_RESPONSE-->  esp_mesh_p2p_rx_main -> grava i2c_readings[idx] (mutex)
 broadcast  READ_REQUEST    ->  esp_mesh_p2p_tx_main -> rTCounter++ (mutex, cap 3)

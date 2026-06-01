@@ -64,6 +64,7 @@ extern char          numero[8];              /* nº de série (UPDATE) */
 extern char          updateUnicastMacStr[18];/* MAC alvo do update unicast */
 
 void i2c_slave_init(void);
-void i2c_slave_task(void *arg);
+void i2c_slave_task(void *arg);          /* RX: master -> slave (comandos) */
+void i2c_slave_request_task(void *arg);  /* TX: slave -> master (onRequest contínuo) */
 
 #endif /* I2C_SLAVE_H */

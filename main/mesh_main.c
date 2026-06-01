@@ -146,7 +146,8 @@ void app_main(void)
     esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
 
     i2c_slave_init();
-    xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);
+    xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
+    xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
     start_mesh();
 }
 

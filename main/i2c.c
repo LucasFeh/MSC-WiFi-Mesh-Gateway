@@ -158,15 +158,19 @@ static void i2c_on_receive(const char *buffer)
 /* ---------------------------------------------------------------------------
  * Caminho slave -> master (porte do onRequest() do firmware Arduino).
  *
- * O driver legado (driver/i2c.h) NÃO tem callback de "master read": pré-carrega-se
- * um ring buffer TX com i2c_slave_write_buffer() e o hardware o drena conforme o
- * master clocka os bytes. O master fixo faz requestFrom(addr, I2C_REQUEST_STRIDE)
- * em loop, descartando os bytes de padding 0xFF/0x8f, e para ao ler "FIM".
+ * O driver legado (driver/i2c.h) NÃO tem callback de "master read" — os reads do
+ * master são servidos silenciosamente pelo hardware a partir do ring buffer TX, e
+ * o software NUNCA é notificado de que um read ocorreu (i2c_slave_read_buffer só
+ * devolve o que o master ESCREVEU). Por isso não há como imprimir "a cada onRequest".
  *
- * Como o ring buffer é FIFO e persiste entre transações, emitimos cada registro
- * (1 JSON, "Vazio" ou "FIM") com EXATAMENTE I2C_REQUEST_STRIDE bytes. Assim cada
- * requestFrom drena um registro, reproduzindo o sendWireIndex++ do Arduino sem
- * precisar de callback. O ACK/NACK por byte é feito pelo hardware do periférico.
+ * O master fixo faz requestFrom(addr, I2C_REQUEST_STRIDE) em loop CONTÍNUO (sem
+ * escrever antes), descartando os bytes de padding 0xFF/0x8f, e para ao ler "FIM".
+ * Como o ring buffer é FIFO e persiste entre transações, a task i2c_slave_request_task
+ * mantém o buffer continuamente reabastecido com blobs [um registro por MAC + "FIM"],
+ * cada registro com EXATAMENTE I2C_REQUEST_STRIDE bytes. Assim cada requestFrom drena
+ * um registro, reproduzindo o sendWireIndex++ do Arduino sem callback. O backpressure
+ * do próprio ring buffer (a escrita bloqueia quando cheio) limita a "idade" dos dados
+ * a ~1 ciclo. O ACK/NACK por byte é feito pelo hardware do periférico.
  * ------------------------------------------------------------------------- */
 
 /* Escreve 'text' no offset 'off' do blob e completa o registro com padding 0xFF
@@ -192,6 +196,7 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
     int count = i2c_mac_count;
     if (count <= 0) {
         off = i2c_emit_record(blob, off, "Vazio");
+        ESP_LOGI(TAG, "Nenhum MAC cadastrado: resposta com 'Vazio'");
     } else {
         for (int i = 0; i < count && off + I2C_REQUEST_STRIDE <= cap; i++) {
             uint8_t ch1 = i2c_readings[i].ch1;
@@ -224,23 +229,39 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
     return off;
 }
 
-/* Monta a resposta e a pré-carrega no ring buffer TX do driver. Chamada na própria
-   task I2C logo após o comando que setou RequestSendFlag, ou seja, antes de o master
-   iniciar o requestFrom — o que evita corrida na primeira leitura. */
-static void i2c_load_request_response(void)
+/* Task dedicada do caminho slave -> master. Mantém o ring buffer TX cheio com o
+   blob atual (MACs+leituras + "FIM"). i2c_slave_write_buffer bloqueia quando o
+   buffer está cheio (master sem drenar/ocioso), de modo que: (a) não há busy-wait,
+   (b) a idade dos dados fica limitada a ~1 ciclo de leitura, (c) a escrita é sempre
+   do blob inteiro (múltiplo de I2C_REQUEST_STRIDE), preservando o alinhamento do FIFO. */
+void i2c_slave_request_task(void *arg)
 {
     static uint8_t blob[I2C_TX_BUF_SIZE];   /* .bss, não pesa na pilha da task */
+    uint32_t cycles = 0;
 
-    size_t len = i2c_build_request_blob(blob, sizeof(blob));
-    int written = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob, (int)len,
-                                         pdMS_TO_TICKS(I2C_READ_TIMEOUT_MS));
+    ESP_LOGI(TAG, "Task de resposta I2C (slave->master) iniciada");
 
-    if (written < 0) {
-        ESP_LOGE(TAG, "Falha ao carregar resposta no TX (%d)", written);
-        return;
+    while (1) {
+        size_t len = i2c_build_request_blob(blob, sizeof(blob));
+
+        /* Timeout finito: se o buffer estiver cheio (master ocioso), re-tenta no
+           próximo loop com dados frescos, sem avançar nada (mantém alinhamento). */
+        int written = i2c_slave_write_buffer(I2C_SLAVE_PORT, blob, (int)len,
+                                             pdMS_TO_TICKS(200));
+
+        if (written == (int)len) {
+            /* Um blob inteiro foi entregue ao FIFO = ~um ciclo de poll do master.
+               Log periódico (a cada 10 ciclos) para confirmar a atividade sem poluir. */
+            if ((++cycles % 10) == 0) {
+                ESP_LOGI(TAG, "onRequest: %u ciclo(s) servido(s) ao master (%d registro(s)/ciclo)",
+                         (unsigned)cycles, (int)(len / I2C_REQUEST_STRIDE));
+            }
+        } else if (written < 0) {
+            ESP_LOGE(TAG, "Falha ao escrever resposta no TX (%d)", written);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        /* written == 0: buffer cheio dentro do timeout; segue o loop. */
     }
-    ESP_LOGI(TAG, "Resposta a master read carregada: %d/%u byte(s), %d registro(s)",
-             written, (unsigned)len, (int)(len / I2C_REQUEST_STRIDE));
 }
 
 void i2c_slave_task(void *arg)
@@ -274,16 +295,11 @@ void i2c_slave_task(void *arg)
         memcpy(printable, rx_data, n);
         printable[n] = '\0';
 
-        /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino) */
+        /* 3) Trata o comando recebido (dispatcher portado do onReceive Arduino).
+           A resposta ao master (caminho slave -> master) é servida continuamente por
+           i2c_slave_request_task(), independente de comando — o master fixo faz poll
+           contínuo. RequestSendFlag permanece como sinal de controle (mesh). */
         ESP_LOGI(TAG, "Texto:  %s", printable);
         i2c_on_receive(printable);
-
-        /* 4) Caminho slave -> master: se o comando pediu envio (CLICKED/COMMIT/
-           UNCOMMIT setam RequestSendFlag), pré-carrega a resposta AGORA — antes de
-           o master iniciar o requestFrom (porte do onRequest Arduino). */
-        if (RequestSendFlag) {
-            RequestSendFlag = false;
-            i2c_load_request_response();
-        }
     }
 }
