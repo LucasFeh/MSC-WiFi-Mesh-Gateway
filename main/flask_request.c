@@ -22,12 +22,48 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/* Extrai o valor string de "key":"value" de um JSON simples (payload controlado
+   pelo nosso Flask). Retorna true e preenche out em caso de sucesso. */
+static bool ws_json_str(const char *json, const char *key, char *out, size_t outlen)
+{
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *k = strstr(json, pat);
+    if (!k) return false;
+    const char *colon = strchr(k + strlen(pat), ':');
+    if (!colon) return false;
+    const char *q1 = strchr(colon, '"');
+    if (!q1) return false;
+    const char *q2 = strchr(q1 + 1, '"');
+    if (!q2) return false;
+    size_t n = (size_t)(q2 - (q1 + 1));
+    if (n >= outlen) n = outlen - 1;
+    memcpy(out, q1 + 1, n);
+    out[n] = '\0';
+    return true;
+}
+
 static void ws_event_handler(void *arg, esp_event_base_t base,
                               int32_t event_id, void *event_data)
 {
     esp_websocket_event_data_t *d = (esp_websocket_event_data_t *)event_data;
-    if (event_id == WEBSOCKET_EVENT_DATA && d->op_code == 0x01) {
-        if (d->data_len > 0 && strstr(d->data_ptr, "READ") != NULL) {
+    if (event_id == WEBSOCKET_EVENT_DATA && d->op_code == 0x01 && d->data_len > 0) {
+        /* WS pode não terminar em '\0': copia para buffer local null-terminado. */
+        char buf[256];
+        int n = d->data_len < (int)sizeof(buf) - 1 ? d->data_len : (int)sizeof(buf) - 1;
+        memcpy(buf, d->data_ptr, n);
+        buf[n] = '\0';
+
+        if (strstr(buf, "\"OTA\"")) {
+            char file[64], url[160];
+            if (ws_json_str(buf, "file", file, sizeof(file)) &&
+                ws_json_str(buf, "url",  url,  sizeof(url))) {
+                ESP_LOGI(MESH_TAG, "[WS] OTA recebido: file=%s url=%s", file, url);
+                trigger_ota(url, file);     /* roteia por nome: Gateway->self, Driver->mesh */
+            } else {
+                ESP_LOGW(MESH_TAG, "[WS] OTA malformado: %s", buf);
+            }
+        } else if (strstr(buf, "READ")) {
             ESP_LOGI(MESH_TAG, "[WS] READ_REQUEST recebido");
             pending_read_broadcast = true;
         }

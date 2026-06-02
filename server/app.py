@@ -1,4 +1,5 @@
 import os
+import json
 import socket
 import asyncio
 import threading
@@ -17,6 +18,7 @@ ROOT_OFFLINE_TIMEOUT_S = 15
 _lock = Lock()
 _devices = {}
 _ota_pending_url = None
+_ota_pending_name = None
 _firmware_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware_upload.bin")
 _root_ws = None
 _ws_loop = None
@@ -160,19 +162,33 @@ def receive_offline():
 
 @app.post("/api/ota/upload")
 def upload_firmware():
-    global _ota_pending_url
+    global _ota_pending_url, _ota_pending_name
     if "file" not in request.files:
         return jsonify({"ok": False, "error": "no file attached"}), 400
     f = request.files["file"]
     if not f.filename.lower().endswith(".bin"):
         return jsonify({"ok": False, "error": "o arquivo deve ser .bin"}), 400
+    # Preserva o NOME original (ex.: "Gateway.bin", "Driver-1.bin") — é ele que o
+    # ROOT usa para rotear (self-update vs repasse via mesh).
+    fname = os.path.basename(f.filename)
     f.save(_firmware_path)
     size = os.path.getsize(_firmware_path)
     port = request.host.split(":")[1] if ":" in request.host else "5000"
     ota_url = f"http://{_get_local_ip()}:{port}/firmware/latest.bin"
     with _lock:
         _ota_pending_url = ota_url
-    return jsonify({"ok": True, "fw_url": ota_url, "size": size})
+        _ota_pending_name = fname
+
+    # Empurra o comando OTA ao ROOT pelo WebSocket (mesmo canal do READ). O ROOT
+    # decide a rota pelo nome e baixa o .bin de ota_url.
+    pushed = False
+    if _root_ws is not None and _ws_loop is not None:
+        msg = json.dumps({"cmd": "OTA", "file": fname, "url": ota_url})
+        asyncio.run_coroutine_threadsafe(_root_ws.send(msg), _ws_loop)
+        pushed = True
+
+    return jsonify({"ok": True, "fw_url": ota_url, "size": size,
+                    "file": fname, "pushed": pushed})
 
 
 @app.get("/firmware/latest.bin")

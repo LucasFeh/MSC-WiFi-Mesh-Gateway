@@ -21,7 +21,8 @@
 #define LED_ROOT_PIN        2
 #define RX_SIZE             (1500)
 
-#define BIN_MSG_FW_PACKET       0x0001
+/* BIN_MSG_FW_PACKET removido: o OTA agora usa BIN_MSG_OTA / BIN_MSG_OTA_ACK
+   de ota_protocol.h (incluído via ota.h), com valor único nos dois repos. */
 #define BIN_MSG_READ_REQUEST    0x0002
 #define BIN_MSG_READ_RESPONSE   0x0003
 #define BIN_MSG_STATUS          0x0004

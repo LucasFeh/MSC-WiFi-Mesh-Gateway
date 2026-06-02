@@ -142,7 +142,7 @@ void app_main(void)
 {
     esp_ota_mark_app_valid_cancel_rollback();
     esp_log_level_set("*", ESP_LOG_NONE);
-    // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
 
     i2c_slave_init();
@@ -207,8 +207,15 @@ void esp_mesh_p2p_rx_main(void *arg)
                     mac_to_str(from.addr, from_str);
                     mac_to_str(s->parent_mac, parent_str);
                     post_status_to_flask(from_str, parent_str, s->layer, s->rssi, s->version);
-                    
+
                     break;
+
+                case BIN_MSG_OTA_ACK: {
+                    /* Confirmação de entrega de OTA vinda de um nó (Fluxo B). */
+                    ota_ack_t *ack = (ota_ack_t *)data.data;
+                    ota_root_register_ack(from.addr, ack->status);
+                    break;
+                }
             }
         }
     }

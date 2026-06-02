@@ -155,8 +155,12 @@ async function sendOta() {
         const d = await r.json();
         if (d.ok) {
             const kb = d.size ? ` (${(d.size / 1024).toFixed(1)} KB)` : "";
-            status.textContent = `${fname}${kb} enviado! Root irá baixar e distribuir na próxima checagem (~10s).`;
-            status.style.color = "#22c55e";
+            const rota = /gateway/i.test(fname) ? "self-update do ROOT"
+                       : /driver/i.test(fname)  ? "repasse aos nos via mesh"
+                       : "nome desconhecido (sera ignorado pelo ROOT)";
+            const aviso = d.pushed ? "ROOT notificado (push WS)" : "ROOT offline - envio ignorado";
+            status.textContent = `${fname}${kb} enviado! ${aviso} - ${rota}. Veja o Serial [OTA].`;
+            status.style.color = d.pushed ? "#22c55e" : "#f59e0b";
         } else {
             status.textContent = "Erro: " + (d.error || "desconhecido");
             status.style.color = "#ef4444";

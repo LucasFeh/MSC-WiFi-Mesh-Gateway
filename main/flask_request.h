@@ -13,7 +13,7 @@
 #define FLASK_READING_URL   "http://192.168.15.213:5000/api/reading"
 #define FLASK_STATUS_URL    "http://192.168.15.213:5000/api/status"
 #define FLASK_WS_URL        "ws://192.168.15.213:5001"
-#define FW_VERSION          "7.0.0"
+#define FW_VERSION          "9.0.0"
 
 
 extern const char *MESH_TAG;
