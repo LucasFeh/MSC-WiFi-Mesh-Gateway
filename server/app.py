@@ -171,6 +171,9 @@ def upload_firmware():
     # Preserva o NOME original (ex.: "Gateway.bin", "Driver-1.bin") — é ele que o
     # ROOT usa para rotear (self-update vs repasse via mesh).
     fname = os.path.basename(f.filename)
+    # Alvo unicast opcional: se presente, o ROOT envia o .bin só para esse MAC,
+    # ignorando o roteamento por nome. Ausente -> broadcast por nome (atual).
+    target = (request.form.get("target") or "").strip().lower()
     f.save(_firmware_path)
     size = os.path.getsize(_firmware_path)
     port = request.host.split(":")[1] if ":" in request.host else "5000"
@@ -180,15 +183,18 @@ def upload_firmware():
         _ota_pending_name = fname
 
     # Empurra o comando OTA ao ROOT pelo WebSocket (mesmo canal do READ). O ROOT
-    # decide a rota pelo nome e baixa o .bin de ota_url.
+    # decide a rota pelo nome (ou unicast, se 'target' vier) e baixa o .bin de ota_url.
     pushed = False
     if _root_ws is not None and _ws_loop is not None:
-        msg = json.dumps({"cmd": "OTA", "file": fname, "url": ota_url})
+        cmd = {"cmd": "OTA", "file": fname, "url": ota_url}
+        if target:
+            cmd["target"] = target
+        msg = json.dumps(cmd)
         asyncio.run_coroutine_threadsafe(_root_ws.send(msg), _ws_loop)
         pushed = True
 
     return jsonify({"ok": True, "fw_url": ota_url, "size": size,
-                    "file": fname, "pushed": pushed})
+                    "file": fname, "target": target or None, "pushed": pushed})
 
 
 @app.get("/firmware/latest.bin")

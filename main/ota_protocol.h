@@ -52,6 +52,13 @@ typedef struct __attribute__((packed)) {
  * enviados só com o cabeçalho, sem arrastar os 1024 bytes vazios pela mesh. */
 #define OTA_HDR_SIZE   (offsetof(ota_packet_t, payload))
 
+/* O pacote OTA_BEGIN leva, em payload[], o NOME do arquivo .bin que o Gateway
+ * recebeu do dashboard (string null-terminated, ex.: "Driver-1.bin"), com
+ * chunk_size = strlen+1. É o mesmo nome usado no roteamento do Gateway (nomes
+ * "Gateway" ou "Driver"); o NODE o usa p/ recusar firmware do canal errado.
+ * CHUNK/END seguem inalterados — só o BEGIN passa a trafegar essa string. */
+#define OTA_FW_NAME_MAX   64
+
 /* Confirmação NODE -> ROOT, enviada após esp_ota_end()/set_boot e antes do
  * reboot. O MAC de origem vem do parâmetro 'from' de esp_mesh_recv().           */
 typedef struct __attribute__((packed)) {

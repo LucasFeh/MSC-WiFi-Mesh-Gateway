@@ -46,6 +46,12 @@
                 </label>
                 <button onclick="sendOta()" class="ota-btn">Enviar OTA</button>
             </div>
+            <div class="ota-unicast-row">
+                <label class="ota-unicast">
+                    <input type="checkbox" id="otaUnicast"> Enviar unicast
+                </label>
+                <span class="ota-target" id="otaTarget"></span>
+            </div>
             <div id="otaStatus" class="ota-status"></div>
         </div>
         <div class="kpi-card">
@@ -100,6 +106,18 @@
             </div>
         </section>
     </main>
+
+    <div class="modal-overlay" id="macModal" hidden>
+        <div class="modal">
+            <div class="modal-head">
+                <h3>Selecionar n&oacute; (unicast)</h3>
+                <button class="modal-close" id="macModalClose" type="button" aria-label="Fechar">&times;</button>
+            </div>
+            <div class="modal-body" id="macList">
+                <div class="empty">Carregando&hellip;</div>
+            </div>
+        </div>
+    </div>
 
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script src="/static/script/script.js"></script>

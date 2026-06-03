@@ -1,5 +1,6 @@
 #include "ota.h"
 #include <string.h>
+#include <stdio.h>           /* snprintf */
 #include <stdlib.h>
 #include <stddef.h>          /* offsetof */
 #include <inttypes.h>
@@ -46,6 +47,16 @@ static ota_target_t      s_targets[CONFIG_MESH_ROUTE_TABLE_SIZE];
 static int               s_target_count = 0;
 static volatile bool     s_dist_active  = false;
 static SemaphoreHandle_t s_dist_mutex   = NULL;
+
+/* Argumento da task de distribuição via mesh. Quando 'unicast' é true, o alvo é
+ * 'mac' (um único nó); caso contrário a lista de alvos vem da routing table.
+ * 'name' é o nome do .bin, repassado ao NODE no BEGIN p/ o filtro de variante. */
+typedef struct {
+    char    url[160];
+    char    name[OTA_FW_NAME_MAX];
+    bool    unicast;
+    uint8_t mac[6];
+} ota_dist_arg_t;
 
 /* Chamado pelo RX da mesh (mesh_main.c) ao receber um OTA_ACK de um nó. */
 void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status)
@@ -144,33 +155,45 @@ done:
 /* sem aplicar OTA em si mesmo e sem reiniciar até confirmar entrega (ACK).   */
 static void ota_mesh_distribute_task(void *arg)
 {
-    char *url = (char *)arg;
+    ota_dist_arg_t *a = (ota_dist_arg_t *)arg;
+    const char *url = a->url;
     ESP_LOGI(MESH_TAG, "[OTA] mesh: download de %s", url);
 
     if (s_dist_active) { ESP_LOGW(MESH_TAG, "[OTA] distribuição já em andamento, abortando"); goto done; }
 
-    /* 1) Lista de nós a partir da routing table, excluindo o próprio root. */
-    mesh_addr_t route[CONFIG_MESH_ROUTE_TABLE_SIZE];
-    int route_size = 0;
-    if (esp_mesh_get_routing_table(route, sizeof(route), &route_size) != ESP_OK) {
-        ESP_LOGE(MESH_TAG, "[OTA] esp_mesh_get_routing_table falhou"); goto done;
-    }
-    uint8_t self_mac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, self_mac);
-
+    /* 1) Monta a lista de alvos.
+     *    - unicast: um único MAC, escolhido no dashboard.
+     *    - broadcast: todos os nós da routing table, excluindo o próprio root. */
     xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
     s_target_count = 0;
-    for (int i = 0; i < route_size && s_target_count < CONFIG_MESH_ROUTE_TABLE_SIZE; i++) {
-        if (memcmp(route[i].addr, self_mac, 6) == 0) continue;   /* não envia para si */
-        memcpy(s_targets[s_target_count].mac, route[i].addr, 6);
-        s_targets[s_target_count].acked  = false;
-        s_targets[s_target_count].status = OTA_ACK_FAIL;
-        s_target_count++;
+    if (a->unicast) {
+        memcpy(s_targets[0].mac, a->mac, 6);
+        s_targets[0].acked  = false;
+        s_targets[0].status = OTA_ACK_FAIL;
+        s_target_count = 1;
+    } else {
+        mesh_addr_t route[CONFIG_MESH_ROUTE_TABLE_SIZE];
+        int route_size = 0;
+        if (esp_mesh_get_routing_table(route, sizeof(route), &route_size) != ESP_OK) {
+            ESP_LOGE(MESH_TAG, "[OTA] esp_mesh_get_routing_table falhou");
+            xSemaphoreGive(s_dist_mutex); goto done;
+        }
+        uint8_t self_mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, self_mac);
+        for (int i = 0; i < route_size && s_target_count < CONFIG_MESH_ROUTE_TABLE_SIZE; i++) {
+            if (memcmp(route[i].addr, self_mac, 6) == 0) continue;   /* não envia para si */
+            memcpy(s_targets[s_target_count].mac, route[i].addr, 6);
+            s_targets[s_target_count].acked  = false;
+            s_targets[s_target_count].status = OTA_ACK_FAIL;
+            s_target_count++;
+        }
     }
     int N = s_target_count;
     s_dist_active = true;
     xSemaphoreGive(s_dist_mutex);
 
+    if (a->unicast)
+        ESP_LOGI(MESH_TAG, "[OTA] unicast -> "MACSTR, MAC2STR(a->mac));
     ESP_LOGI(MESH_TAG, "[OTA] Nos encontrados: %d", N);
     if (N == 0) { ESP_LOGW(MESH_TAG, "[OTA] nenhum nó na mesh, nada a distribuir"); goto done_active; }
 
@@ -191,10 +214,15 @@ static void ota_mesh_distribute_task(void *arg)
     ota_packet_t *pkt = malloc(sizeof(*pkt));
     if (!pkt) { esp_http_client_close(http); esp_http_client_cleanup(http); goto done_active; }
 
-    /* 2a) BEGIN (só cabeçalho; carrega 'total'). */
+    /* 2a) BEGIN (cabeçalho + nome do .bin em payload, p/ o NODE filtrar a variante). */
     pkt->msg_id = BIN_MSG_OTA; pkt->tipo = OTA_BEGIN;
-    pkt->total = (uint32_t)total; pkt->offset = 0; pkt->chunk_size = 0; pkt->crc = 0;
-    ota_send_to_all(pkt, OTA_HDR_SIZE);
+    pkt->total = (uint32_t)total; pkt->offset = 0; pkt->crc = 0;
+    size_t namelen = strlen(a->name);           /* a->name é null-terminated (snprintf) */
+    if (namelen > OTA_FW_NAME_MAX - 1) namelen = OTA_FW_NAME_MAX - 1;
+    memcpy(pkt->payload, a->name, namelen);
+    pkt->payload[namelen] = '\0';
+    pkt->chunk_size = (uint32_t)(namelen + 1);   /* inclui o terminador */
+    ota_send_to_all(pkt, OTA_HDR_SIZE + namelen + 1);
 
     /* 2b) CHUNKs em fluxo. */
     size_t sent = 0; uint32_t offset = 0; int last_pct = -1; int r;
@@ -245,16 +273,42 @@ static void ota_mesh_distribute_task(void *arg)
 done_active:
     s_dist_active = false;
 done:
-    free(url);
+    free(a);
     vTaskDelete(NULL);
 }
 
+/* Aloca o argumento da task de distribuição e a cria. Retorna false se falhar. */
+static bool ota_start_distribute(const char *url, const char *name, bool unicast, const uint8_t *mac)
+{
+    ota_dist_arg_t *a = calloc(1, sizeof(*a));
+    if (!a) { ESP_LOGE(MESH_TAG, "[OTA] sem memória p/ distribuição"); return false; }
+    snprintf(a->url, sizeof(a->url), "%s", url);
+    snprintf(a->name, sizeof(a->name), "%s", name ? name : "");
+    a->unicast = unicast;
+    if (unicast && mac) memcpy(a->mac, mac, 6);
+    if (xTaskCreate(ota_mesh_distribute_task, "ota_mesh", 8192, a, 5, NULL) != pdPASS) {
+        ESP_LOGE(MESH_TAG, "[OTA] xTaskCreate(ota_mesh) falhou");
+        free(a);
+        return false;
+    }
+    return true;
+}
+
 /* ========================================================================== */
-/* Ponto de entrada: decide a rota pelo NOME e dispara a task correspondente. */
-void trigger_ota(const char *url, const char *name)
+/* Ponto de entrada: unicast (target_mac != NULL) tem prioridade; senão roteia
+ * pelo NOME e dispara a task correspondente. */
+void trigger_ota(const char *url, const char *name, const uint8_t *target_mac)
 {
     if (!url || !name) { ESP_LOGE(MESH_TAG, "[OTA] url/nome nulo"); return; }
     if (!s_dist_mutex) s_dist_mutex = xSemaphoreCreateMutex();
+
+    /* UNICAST: envia o firmware só para o MAC escolhido, ignorando o nome. */
+    if (target_mac) {
+        ESP_LOGI(MESH_TAG, "[OTA] Arquivo recebido: %s", name);
+        ESP_LOGI(MESH_TAG, "[OTA] Destino: unicast "MACSTR, MAC2STR(target_mac));
+        ota_start_distribute(url, name, true, target_mac);
+        return;
+    }
 
     /* LOG [OTA] com a decisão ANTES de qualquer operação OTA. */
     if (strstr(name, "Gateway")) {
@@ -262,11 +316,10 @@ void trigger_ota(const char *url, const char *name)
         ESP_LOGI(MESH_TAG, "[OTA] Destino: ROOT (self-update)");
         char *copy = strdup(url);
         if (copy) xTaskCreate(ota_self_update_task, "ota_self", 8192, copy, 5, NULL);
-    } else if (strstr(name, "Driver")) {
+    } else if (strstr(name, "Driver") || strstr(name, "Driver-1") || strstr(name, "Driver-3")) {
         ESP_LOGI(MESH_TAG, "[OTA] Arquivo recebido: %s", name);
         ESP_LOGI(MESH_TAG, "[OTA] Destino: nos via Mesh");
-        char *copy = strdup(url);
-        if (copy) xTaskCreate(ota_mesh_distribute_task, "ota_mesh", 8192, copy, 5, NULL);
+        ota_start_distribute(url, name, false, NULL);
     } else {
         ESP_LOGW(MESH_TAG, "[OTA] nome desconhecido: %s (esperado Gateway*/Driver*), ignorando", name);
     }

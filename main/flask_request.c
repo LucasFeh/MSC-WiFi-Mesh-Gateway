@@ -43,6 +43,20 @@ static bool ws_json_str(const char *json, const char *key, char *out, size_t out
     return true;
 }
 
+/* "aa:bb:cc:dd:ee:ff" -> mac[6]. Retorna true se os 6 octetos foram lidos. */
+static bool parse_mac(const char *s, uint8_t mac[6])
+{
+    unsigned int b[6];
+    if (sscanf(s, "%x:%x:%x:%x:%x:%x",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return false;
+    for (int i = 0; i < 6; i++) {
+        if (b[i] > 0xFF) return false;
+        mac[i] = (uint8_t)b[i];
+    }
+    return true;
+}
+
 static void ws_event_handler(void *arg, esp_event_base_t base,
                               int32_t event_id, void *event_data)
 {
@@ -55,11 +69,21 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
         buf[n] = '\0';
 
         if (strstr(buf, "\"OTA\"")) {
-            char file[64], url[160];
+            char file[64], url[160], target[24];
             if (ws_json_str(buf, "file", file, sizeof(file)) &&
                 ws_json_str(buf, "url",  url,  sizeof(url))) {
-                ESP_LOGI(MESH_TAG, "[WS] OTA recebido: file=%s url=%s", file, url);
-                trigger_ota(url, file);     /* roteia por nome: Gateway->self, Driver->mesh */
+                /* 'target' é opcional: presente -> unicast para esse MAC;
+                   ausente -> roteia por nome (Gateway->self, Driver->mesh). */
+                uint8_t mac[6];
+                const uint8_t *target_mac = NULL;
+                if (ws_json_str(buf, "target", target, sizeof(target)) &&
+                    parse_mac(target, mac)) {
+                    target_mac = mac;
+                    ESP_LOGI(MESH_TAG, "[WS] OTA recebido: file=%s url=%s target=%s", file, url, target);
+                } else {
+                    ESP_LOGI(MESH_TAG, "[WS] OTA recebido: file=%s url=%s", file, url);
+                }
+                trigger_ota(url, file, target_mac);
             } else {
                 ESP_LOGW(MESH_TAG, "[WS] OTA malformado: %s", buf);
             }

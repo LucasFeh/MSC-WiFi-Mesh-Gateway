@@ -138,6 +138,65 @@ document.getElementById("fwFile").addEventListener("change", function () {
     }
 });
 
+/* ---- Unicast: escolher um MAC alvo num modal ---- */
+let unicastTarget = null;
+
+function updateTargetLabel() {
+    const span = document.getElementById("otaTarget");
+    span.textContent = unicastTarget ? `→ ${unicastTarget}` : "";
+}
+
+function closeMacModal() {
+    document.getElementById("macModal").hidden = true;
+    // Fechou sem escolher um alvo: desmarca o checkbox para manter o estado coerente.
+    if (!unicastTarget) document.getElementById("otaUnicast").checked = false;
+}
+
+async function openMacModal() {
+    const modal = document.getElementById("macModal");
+    const list = document.getElementById("macList");
+    list.innerHTML = '<div class="empty">Carregando…</div>';
+    modal.hidden = false;
+    try {
+        const s = await (await fetch("/api/state")).json();
+        const nodes = s.devices.filter(d => d.layer !== 1);   // exclui o ROOT
+        if (!nodes.length) {
+            list.innerHTML = '<div class="empty">Nenhum nó disponível.</div>';
+            return;
+        }
+        nodes.sort((a, b) => (a.layer ?? 999) - (b.layer ?? 999));
+        list.innerHTML = nodes.map(d => `
+            <button type="button" class="mac-item${d.online ? "" : " mac-off"}" data-mac="${d.mac}">
+                <span class="dot ${d.online ? "dot-on" : "dot-off"}"></span>
+                <span class="mono mac-item-mac">${d.mac}</span>
+                <span class="mac-item-meta">layer ${d.layer ?? "?"} · ${d.online ? "online" : "offline"}</span>
+            </button>
+        `).join("");
+        list.querySelectorAll(".mac-item").forEach(btn => {
+            btn.addEventListener("click", () => {
+                unicastTarget = btn.dataset.mac;
+                updateTargetLabel();
+                document.getElementById("macModal").hidden = true;
+            });
+        });
+    } catch (e) {
+        list.innerHTML = `<div class="empty">Erro ao carregar: ${e.message}</div>`;
+    }
+}
+
+document.getElementById("otaUnicast").addEventListener("change", function () {
+    if (this.checked) {
+        openMacModal();
+    } else {
+        unicastTarget = null;
+        updateTargetLabel();
+    }
+});
+document.getElementById("macModalClose").addEventListener("click", closeMacModal);
+document.getElementById("macModal").addEventListener("click", function (e) {
+    if (e.target === this) closeMacModal();   // clique fora do card fecha
+});
+
 async function sendOta() {
     const fileInput = document.getElementById("fwFile");
     const status = document.getElementById("otaStatus");
@@ -150,12 +209,15 @@ async function sendOta() {
     status.style.color = "#94a3b8";
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
+    // Com MAC selecionado -> unicast; sem nenhum MAC -> envia broadcast como antes.
+    if (unicastTarget) formData.append("target", unicastTarget);
     try {
         const r = await fetch("/api/ota/upload", { method: "POST", body: formData });
         const d = await r.json();
         if (d.ok) {
             const kb = d.size ? ` (${(d.size / 1024).toFixed(1)} KB)` : "";
-            const rota = /gateway/i.test(fname) ? "self-update do ROOT"
+            const rota = d.target ? `unicast → ${d.target}`
+                       : /gateway/i.test(fname) ? "self-update do ROOT"
                        : /driver/i.test(fname)  ? "repasse aos nos via mesh"
                        : "nome desconhecido (sera ignorado pelo ROOT)";
             const aviso = d.pushed ? "ROOT notificado (push WS)" : "ROOT offline - envio ignorado";
