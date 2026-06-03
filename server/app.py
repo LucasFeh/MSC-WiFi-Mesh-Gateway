@@ -23,6 +23,19 @@ _firmware_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmw
 _root_ws = None
 _ws_loop = None
 
+# ── Monitor OTA ──────────────────────────────────────────────────────────────
+# Telemetria do ROOT durante o OTA. Desligada por padrão (o ROOT só reporta
+# quando ligada por botão, evitando overhead). Tudo em memória, como _devices.
+_ota_monitor_enabled = False
+_ota_state = {
+    "active": False, "op": None, "file": None, "total": 0, "pct": 0,
+    "started": None, "finished": None,
+    "targets": [],        # [{"mac":.., "status":"pending"|"ok"|"fail"|"timeout"}]
+    "self_status": None,  # "running"|"rebooting"|"fail" (op self)
+}
+_ota_history = []         # últimos 10: {"file","op","finished","ok","fail","timeout","self_status"}
+_OTA_HISTORY_MAX = 10
+
 
 def _get_local_ip() -> str:
     try:
@@ -64,6 +77,27 @@ def _get_state():
         }
 
 
+def _ota_payload():
+    with _lock:
+        return {
+            "monitor_enabled": _ota_monitor_enabled,
+            "state": {**_ota_state, "targets": [dict(t) for t in _ota_state["targets"]]},
+            "history": [dict(h) for h in _ota_history],
+        }
+
+
+def _emit_ota():
+    socketio.emit('ota_progress', _ota_payload())
+
+
+def _push_to_root(obj: dict) -> bool:
+    """Empurra um comando JSON ao ROOT pelo WebSocket. False se o ROOT está off."""
+    if _root_ws is not None and _ws_loop is not None:
+        asyncio.run_coroutine_threadsafe(_root_ws.send(json.dumps(obj)), _ws_loop)
+        return True
+    return False
+
+
 def _watch_root():
     prev_online = {}
     while True:
@@ -82,6 +116,11 @@ async def _ws_root_handler(websocket):
     global _root_ws
     _root_ws = websocket
     try:
+        # Re-sincroniza o estado do monitor com o ROOT recém-conectado (cobre o
+        # ROOT ter reiniciado, p.ex. após um self-update, perdendo o flag).
+        with _lock:
+            on = _ota_monitor_enabled
+        await websocket.send(json.dumps({"cmd": "OTAMON", "on": on}))
         async for _ in websocket:
             pass
     finally:
@@ -107,6 +146,18 @@ def handle_read_request():
         sio_emit('read_error', {'msg': 'Root não conectado'})
         return
     asyncio.run_coroutine_threadsafe(_root_ws.send('{"cmd":"READ"}'), _ws_loop)
+
+
+@socketio.on('set_ota_monitor')
+def handle_set_ota_monitor(data):
+    """Liga/desliga a telemetria OTA: atualiza o flag, avisa o ROOT (OTAMON) e
+    reemite o novo estado a todos os navegadores."""
+    global _ota_monitor_enabled
+    on = bool((data or {}).get('on'))
+    with _lock:
+        _ota_monitor_enabled = on
+    pushed = _push_to_root({"cmd": "OTAMON", "on": on})
+    socketio.emit('ota_monitor_state', {"monitor_enabled": on, "pushed": pushed})
 
 
 @app.post("/api/status")
@@ -208,6 +259,66 @@ def serve_firmware():
 @app.get("/api/state")
 def state():
     return jsonify(_get_state())
+
+
+@app.post("/api/ota/progress")
+def ota_progress():
+    """Recebe os eventos de telemetria do ROOT (start/progress/ack/done),
+    aplica em _ota_state, fecha no histórico no 'done', e reemite ao navegador."""
+    ev = request.get_json(silent=True) or {}
+    etype = ev.get("event")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock:
+        if etype == "start":
+            op = ev.get("op")
+            _ota_state.update({
+                "active": True,
+                "op": op,
+                "file": ev.get("file"),
+                "total": ev.get("total", 0),
+                "pct": 0,
+                "started": now,
+                "finished": None,
+                "self_status": "running" if op == "self" else None,
+                "targets": [{"mac": (m or "").lower(), "status": "pending"}
+                            for m in (ev.get("targets") or [])],
+            })
+        elif etype == "progress":
+            _ota_state["pct"] = ev.get("pct", _ota_state["pct"])
+        elif etype == "ack":
+            mac = (ev.get("mac") or "").lower()
+            new_status = "ok" if ev.get("status") == "ok" else "fail"
+            for t in _ota_state["targets"]:
+                if t["mac"] == mac:
+                    t["status"] = new_status
+                    break
+        elif etype == "done":
+            _ota_state["active"] = False
+            _ota_state["finished"] = now
+            if _ota_state["op"] == "self":
+                _ota_state["self_status"] = ev.get("status", "done")
+                if ev.get("status") == "rebooting":
+                    _ota_state["pct"] = 100
+            else:
+                for t in _ota_state["targets"]:        # pendentes => timeout
+                    if t["status"] == "pending":
+                        t["status"] = "timeout"
+            ok = sum(1 for t in _ota_state["targets"] if t["status"] == "ok")
+            fail = sum(1 for t in _ota_state["targets"] if t["status"] == "fail")
+            timeout = sum(1 for t in _ota_state["targets"] if t["status"] == "timeout")
+            _ota_history.insert(0, {
+                "file": _ota_state["file"], "op": _ota_state["op"], "finished": now,
+                "ok": ok, "fail": fail, "timeout": timeout,
+                "self_status": _ota_state["self_status"],
+            })
+            del _ota_history[_OTA_HISTORY_MAX:]
+    _emit_ota()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/ota/state")
+def ota_state():
+    return jsonify(_ota_payload())
 
 
 @app.get("/")

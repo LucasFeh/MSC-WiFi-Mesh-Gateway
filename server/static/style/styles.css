@@ -475,3 +475,155 @@ th { color: #94a3b8; font-weight: 500; }
     white-space: nowrap;
 }
 .topo-btn:hover { background: #163057; }
+
+/* ── Monitor OTA ── */
+.ota-monitor { margin: 8px 24px 0; }
+
+.ota-monitor-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.ota-monitor-head h2 {
+    margin: 0;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+}
+
+.ota-mon-note {
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+    background: #ef444433;
+    border: 1px solid #ef444466;
+    color: #ef4444;
+}
+.ota-monitor.mon-on .ota-mon-note {
+    background: #16a34a33;
+    border-color: #16a34a66;
+    color: #22c55e;
+}
+
+.mon-toggle {
+    padding: 6px 14px;
+    background: #334155;
+    color: #cbd5e1;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.mon-toggle:hover { background: #3e4c63; }
+.mon-toggle.mon-active {
+    background: #16a34a;
+    border-color: #16a34a;
+    color: #fff;
+}
+.mon-toggle.mon-active:hover { background: #15803d; }
+
+/* Esmaece o conteúdo quando o monitor está desligado */
+.ota-monitor:not(.mon-on) .ota-mon-current,
+.ota-monitor:not(.mon-on) .ota-mon-cols { opacity: 0.45; }
+
+.ota-mon-current {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.ota-mon-info { display: flex; flex-direction: column; min-width: 140px; }
+.ota-mon-op { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+.ota-mon-file { font-size: 11px; color: #94a3b8; }
+
+.progress {
+    flex: 1;
+    height: 12px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    overflow: hidden;
+}
+.progress-bar {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, #2563eb, #60a5fa);
+    transition: width 0.3s ease;
+}
+.ota-mon-pct {
+    min-width: 42px;
+    text-align: right;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 13px;
+    color: #e2e8f0;
+}
+
+.ota-mon-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+.ota-mon-col h3 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+}
+.ota-mon-col > div { max-height: 220px; overflow-y: auto; }
+
+.ota-tg-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 6px;
+    border-bottom: 1px solid #1e293b;
+    font-size: 13px;
+}
+
+.st-badge {
+    min-width: 92px;
+    text-align: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.st-pending   { background: #47556933; border: 1px solid #47556966; color: #94a3b8; }
+.st-running,
+.st-rebooting { background: #2563eb33; border: 1px solid #2563eb66; color: #60a5fa; }
+.st-ok        { background: #16a34a33; border: 1px solid #16a34a66; color: #22c55e; }
+.st-fail      { background: #ef444433; border: 1px solid #ef444466; color: #ef4444; }
+.st-timeout   { background: #d9770633; border: 1px solid #d9770666; color: #f59e0b; }
+
+.ota-hist-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-bottom: 1px dashed #334155;
+    font-size: 12px;
+}
+.ota-hist-file { flex: 0 0 auto; color: #e2e8f0; }
+.ota-hist-sum  { flex: 1; color: #94a3b8; }
+.ota-hist-ts   { color: #64748b; }
+
+@media (max-width: 900px) {
+    .ota-monitor { margin: 8px 16px 0; }
+}
+@media (max-width: 600px) {
+    .ota-monitor { margin: 8px 12px 0; }
+    .ota-mon-current { flex-wrap: wrap; }
+    .ota-mon-cols { grid-template-columns: 1fr; }
+}

@@ -68,7 +68,12 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
         memcpy(buf, d->data_ptr, n);
         buf[n] = '\0';
 
-        if (strstr(buf, "\"OTA\"")) {
+        if (strstr(buf, "OTAMON")) {
+            /* Liga/desliga a telemetria OTA. Único booleano da mensagem é 'on'. */
+            bool on = (strstr(buf, "true") != NULL);
+            ESP_LOGI(MESH_TAG, "[WS] Monitor OTA %s", on ? "LIGADO" : "DESLIGADO");
+            ota_set_monitor(on);
+        } else if (strstr(buf, "\"OTA\"")) {
             char file[64], url[160], target[24];
             if (ws_json_str(buf, "file", file, sizeof(file)) &&
                 ws_json_str(buf, "url",  url,  sizeof(url))) {
@@ -155,6 +160,25 @@ void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t l
     if (!client) return;
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, body, n);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+/* Telemetria OTA: posta um JSON já montado em ota.c. O gate liga/desliga do
+   monitor é decidido lá; aqui só checamos conectividade, como nos demais posts. */
+void post_ota_event(const char *json_body)
+{
+    if (!is_got_ip || !flask_connected) return;
+
+    esp_http_client_config_t cfg = {
+        .url        = FLASK_OTA_PROGRESS_URL,
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, json_body, strlen(json_body));
     esp_http_client_perform(client);
     esp_http_client_cleanup(client);
 }

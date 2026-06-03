@@ -61,6 +61,31 @@
         </div>
     </div>
 
+    <section class="ota-monitor" id="otaMonitor">
+        <div class="ota-monitor-head">
+            <h2>Monitor OTA <span class="ota-mon-note" id="otaMonNote">desativado</span></h2>
+            <button id="otaMonBtn" class="mon-toggle" type="button" onclick="toggleOtaMonitor()">Ativar monitor</button>
+        </div>
+        <div class="ota-mon-current">
+            <div class="ota-mon-info">
+                <span class="ota-mon-op" id="otaMonOp">&mdash;</span>
+                <span class="mono ota-mon-file" id="otaMonFile"></span>
+            </div>
+            <div class="progress"><div class="progress-bar" id="otaMonBar"></div></div>
+            <span class="ota-mon-pct" id="otaMonPct">0%</span>
+        </div>
+        <div class="ota-mon-cols">
+            <div class="ota-mon-col">
+                <h3>Alvos</h3>
+                <div id="otaMonTargets"><div class="empty">Sem envio ativo.</div></div>
+            </div>
+            <div class="ota-mon-col">
+                <h3>Hist&oacute;rico</h3>
+                <div id="otaMonHistory"><div class="empty">Sem envios ainda.</div></div>
+            </div>
+        </div>
+    </section>
+
     <main>
         <section>
             <h2>Dispositivos &mdash; <span id="devOnline">0</span> online / <span id="devCount">0</span> total</h2>

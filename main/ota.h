@@ -1,5 +1,6 @@
 #ifndef OTA_H_
 #define OTA_H_
+#include <stdbool.h>
 #include "flask_request.h"   /* MESH_TAG + esp_ota_ops.h / esp_mesh.h / esp_http_client.h */
 #include "ota_protocol.h"    /* protocolo de fio compartilhado com o Driver               */
 
@@ -16,5 +17,9 @@ void trigger_ota(const char *url, const char *name, const uint8_t *target_mac);
 
 /* Registra o OTA_ACK de um nó (chamado pelo RX da mesh, Fluxo B). */
 void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status);
+
+/* Liga/desliga a telemetria OTA para o Flask (comando WS "OTAMON").
+   Desligado por padrão: com OFF o ROOT não emite nenhum POST de progresso. */
+void ota_set_monitor(bool on);
 
 #endif /* OTA_H_ */

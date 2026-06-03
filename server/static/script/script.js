@@ -232,3 +232,80 @@ async function sendOta() {
         status.style.color = "#ef4444";
     }
 }
+
+/* ===== Monitor OTA (telemetria do ROOT, ativável por botão) ===== */
+let otaMonitorEnabled = false;
+
+function toggleOtaMonitor() {
+    socket.emit('set_ota_monitor', { on: !otaMonitorEnabled });
+}
+
+function otaOpLabel(op) {
+    return op === "self" ? "ROOT (self-update)"
+        : op === "unicast" ? "Unicast"
+        : op === "mesh" ? "Mesh (broadcast)"
+        : "—";
+}
+
+function otaStatusLabel(s) {
+    return ({ pending: "pendente", ok: "recebeu", fail: "falhou",
+              timeout: "timeout", running: "em progresso", rebooting: "reiniciando" })[s] || s;
+}
+
+function setOtaMonitorEnabled(on) {
+    otaMonitorEnabled = on;
+    document.getElementById("otaMonitor").classList.toggle("mon-on", on);
+    const btn = document.getElementById("otaMonBtn");
+    btn.textContent = on ? "Desativar monitor" : "Ativar monitor";
+    btn.classList.toggle("mon-active", on);
+    document.getElementById("otaMonNote").textContent = on ? "ativo" : "desativado";
+}
+
+function renderOtaMonitor(p) {
+    if (typeof p.monitor_enabled === "boolean") setOtaMonitorEnabled(p.monitor_enabled);
+    const st = p.state || {};
+    document.getElementById("otaMonOp").textContent = otaOpLabel(st.op);
+    document.getElementById("otaMonFile").textContent = st.file || "";
+    const pct = st.pct || 0;
+    document.getElementById("otaMonBar").style.width = pct + "%";
+    document.getElementById("otaMonPct").textContent = pct + "%";
+
+    const tgt = document.getElementById("otaMonTargets");
+    if (st.op === "self") {
+        const ss = st.self_status || "running";
+        tgt.innerHTML = `<div class="ota-tg-row">
+            <span class="st-badge st-${ss}">${otaStatusLabel(ss)}</span>
+            <span class="mono">ROOT</span></div>`;
+    } else if (st.targets && st.targets.length) {
+        tgt.innerHTML = st.targets.map(t => `<div class="ota-tg-row">
+            <span class="st-badge st-${t.status}">${otaStatusLabel(t.status)}</span>
+            <span class="mono">${t.mac}</span></div>`).join("");
+    } else {
+        tgt.innerHTML = '<div class="empty">Sem envio ativo.</div>';
+    }
+
+    const hist = document.getElementById("otaMonHistory");
+    if (p.history && p.history.length) {
+        hist.innerHTML = p.history.map(h => {
+            const when = h.finished ? fmtTs(h.finished) : "--";
+            const summary = h.op === "self"
+                ? otaStatusLabel(h.self_status || "—")
+                : `${h.ok} ok · ${h.fail} falha · ${h.timeout} timeout`;
+            return `<div class="ota-hist-row">
+                <span class="mono ota-hist-file">${h.file || "?"}</span>
+                <span class="ota-hist-sum">${summary}</span>
+                <span class="ota-hist-ts mono">${when}</span></div>`;
+        }).join("");
+    } else {
+        hist.innerHTML = '<div class="empty">Sem envios ainda.</div>';
+    }
+}
+
+socket.on('ota_progress', renderOtaMonitor);
+socket.on('ota_monitor_state', function (d) { setOtaMonitorEnabled(!!d.monitor_enabled); });
+
+(async function initOtaMonitor() {
+    try {
+        renderOtaMonitor(await (await fetch("/api/ota/state")).json());
+    } catch (e) { /* silencioso: monitor aparece ao primeiro evento */ }
+})();

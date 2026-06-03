@@ -58,6 +58,87 @@ typedef struct {
     uint8_t mac[6];
 } ota_dist_arg_t;
 
+/* Argumento da task de self-update (Fluxo A): URL + nome do .bin (este último
+ * só para a telemetria do monitor). */
+typedef struct {
+    char url[160];
+    char name[OTA_FW_NAME_MAX];
+} ota_self_arg_t;
+
+/* ===========================================================================
+ *  Telemetria OTA para o dashboard (Monitor OTA).
+ *  Desligada por padrão; ligada pelo comando WS "OTAMON" -> ota_set_monitor().
+ *  Com s_ota_monitor=false NENHUM POST é emitido (zero overhead no gateway).
+ *  Os helpers montam o JSON e chamam post_ota_event() (HTTP POST -> Flask).
+ * ========================================================================== */
+static volatile bool s_ota_monitor = false;
+
+void ota_set_monitor(bool on)
+{
+    s_ota_monitor = on;
+}
+
+static void ota_report_start_self(const char *name, size_t total)
+{
+    if (!s_ota_monitor) return;
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"event\":\"start\",\"op\":\"self\",\"file\":\"%s\",\"total\":%u}",
+             name, (unsigned)total);
+    post_ota_event(body);
+}
+
+/* start da distribuição mesh: inclui a lista de MACs alvo (lida de s_targets,
+ * já populada pela task). Limita os MACs ao que couber no buffer. */
+static void ota_report_start_mesh(bool unicast, const char *name, size_t total)
+{
+    if (!s_ota_monitor) return;
+    char body[512];
+    int p = snprintf(body, sizeof(body),
+        "{\"event\":\"start\",\"op\":\"%s\",\"file\":\"%s\",\"total\":%u,\"targets\":[",
+        unicast ? "unicast" : "mesh", name, (unsigned)total);
+    for (int i = 0; i < s_target_count && p > 0 && p < (int)sizeof(body) - 24; i++) {
+        p += snprintf(body + p, sizeof(body) - (size_t)p, "%s\""MACSTR"\"",
+                      i ? "," : "", MAC2STR(s_targets[i].mac));
+    }
+    snprintf(body + p, sizeof(body) - (size_t)p, "]}");
+    post_ota_event(body);
+}
+
+static void ota_report_progress(int pct)
+{
+    if (!s_ota_monitor) return;
+    char body[48];
+    snprintf(body, sizeof(body), "{\"event\":\"progress\",\"pct\":%d}", pct);
+    post_ota_event(body);
+}
+
+static void ota_report_ack(const uint8_t mac[6], uint8_t status)
+{
+    if (!s_ota_monitor) return;
+    char body[96];
+    snprintf(body, sizeof(body),
+             "{\"event\":\"ack\",\"mac\":\""MACSTR"\",\"status\":\"%s\"}",
+             MAC2STR(mac), status == OTA_ACK_OK ? "ok" : "fail");
+    post_ota_event(body);
+}
+
+/* done da mesh: o Flask deriva o resumo (alvos ainda 'pendentes' viram timeout). */
+static void ota_report_done_mesh(void)
+{
+    if (!s_ota_monitor) return;
+    post_ota_event("{\"event\":\"done\"}");
+}
+
+static void ota_report_done_self(const char *status)
+{
+    if (!s_ota_monitor) return;
+    char body[96];
+    snprintf(body, sizeof(body),
+             "{\"event\":\"done\",\"op\":\"self\",\"status\":\"%s\"}", status);
+    post_ota_event(body);
+}
+
 /* Chamado pelo RX da mesh (mesh_main.c) ao receber um OTA_ACK de um nó. */
 void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status)
 {
@@ -97,7 +178,9 @@ static void ota_send_to_all(const ota_packet_t *pkt, size_t size)
 /* Fluxo A: nome contém "Gateway" -> ROOT atualiza a si mesmo.                */
 static void ota_self_update_task(void *arg)
 {
-    char *url = (char *)arg;
+    ota_self_arg_t *a = (ota_self_arg_t *)arg;
+    const char *url = a->url;
+    bool started = false;          /* true após emitir o evento 'start' ao monitor */
     ESP_LOGI(MESH_TAG, "[OTA] self: download de %s", url);
 
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
@@ -116,6 +199,8 @@ static void ota_self_update_task(void *arg)
         esp_http_client_close(http); esp_http_client_cleanup(http); goto done;
     }
     ESP_LOGI(MESH_TAG, "[OTA] firmware: %lld bytes", total);
+    ota_report_start_self(a->name, (size_t)total);
+    started = true;
 
     esp_ota_handle_t h;
     if (esp_ota_begin(part, (size_t)total, &h) != ESP_OK) {
@@ -126,12 +211,13 @@ static void ota_self_update_task(void *arg)
     uint8_t *buf = malloc(OTA_CHUNK_MAX);
     if (!buf) { esp_ota_abort(h); esp_http_client_close(http); esp_http_client_cleanup(http); goto done; }
 
-    size_t written = 0; int last_pct = -1; bool err = false; int r;
+    size_t written = 0; int last_pct = -1; int last_rep = -1; bool err = false; int r;
     while ((r = esp_http_client_read(http, (char *)buf, OTA_CHUNK_MAX)) > 0) {
         if (esp_ota_write(h, buf, r) != ESP_OK) { ESP_LOGE(MESH_TAG, "[OTA] write falhou"); err = true; break; }
         written += r;
         int pct = (int)((uint64_t)written * 100 / (uint64_t)total);
         if (pct != last_pct) { ota_print_progress("self", written, total); last_pct = pct; }
+        if (pct / 10 != last_rep / 10) { last_rep = pct; ota_report_progress(pct); }  /* throttle ~10% */
     }
     free(buf);
     esp_http_client_close(http);
@@ -142,11 +228,13 @@ static void ota_self_update_task(void *arg)
     if (esp_ota_set_boot_partition(part) != ESP_OK) { ESP_LOGE(MESH_TAG, "[OTA] set_boot falhou"); goto done; }
 
     ESP_LOGI(MESH_TAG, "[OTA] self completo! reiniciando...");
+    ota_report_done_self("rebooting");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
 done:
-    free(url);
+    if (started) ota_report_done_self("fail");   /* chegou aqui sem reiniciar = falhou */
+    free(a);
     vTaskDelete(NULL);
 }
 
@@ -210,6 +298,7 @@ static void ota_mesh_distribute_task(void *arg)
         esp_http_client_close(http); esp_http_client_cleanup(http); goto done_active;
     }
     ESP_LOGI(MESH_TAG, "[OTA] firmware: %lld bytes -> %d nó(s)", total, N);
+    ota_report_start_mesh(a->unicast, a->name, (size_t)total);   /* alvos já em s_targets */
 
     ota_packet_t *pkt = malloc(sizeof(*pkt));
     if (!pkt) { esp_http_client_close(http); esp_http_client_cleanup(http); goto done_active; }
@@ -225,7 +314,7 @@ static void ota_mesh_distribute_task(void *arg)
     ota_send_to_all(pkt, OTA_HDR_SIZE + namelen + 1);
 
     /* 2b) CHUNKs em fluxo. */
-    size_t sent = 0; uint32_t offset = 0; int last_pct = -1; int r;
+    size_t sent = 0; uint32_t offset = 0; int last_pct = -1; int last_rep = -1; int r;
     while ((r = esp_http_client_read(http, (char *)pkt->payload, OTA_CHUNK_MAX)) > 0) {
         pkt->msg_id = BIN_MSG_OTA; pkt->tipo = OTA_CHUNK;
         pkt->total = (uint32_t)total; pkt->offset = offset; pkt->chunk_size = (uint32_t)r;
@@ -234,6 +323,7 @@ static void ota_mesh_distribute_task(void *arg)
         offset += (uint32_t)r; sent += (size_t)r;
         int pct = (int)((uint64_t)sent * 100 / (uint64_t)total);
         if (pct != last_pct) { ota_print_progress("mesh", sent, total); last_pct = pct; }
+        if (pct / 10 != last_rep / 10) { last_rep = pct; ota_report_progress(pct); }  /* throttle ~10% */
     }
 
     /* 2c) END (só cabeçalho). */
@@ -250,11 +340,28 @@ static void ota_mesh_distribute_task(void *arg)
     TickType_t start = xTaskGetTickCount();
     const TickType_t timeout = pdMS_TO_TICKS(30000);
     int acked = 0;
+    bool reported[CONFIG_MESH_ROUTE_TABLE_SIZE];
+    memset(reported, 0, sizeof(reported));
     while ((xTaskGetTickCount() - start) < timeout) {
+        /* Snapshot dos ACKs novos sob mutex; o POST de telemetria vai fora dele
+           para não bloquear o RX da mesh (que chama ota_root_register_ack). */
+        uint8_t newmac[CONFIG_MESH_ROUTE_TABLE_SIZE][6];
+        uint8_t newst[CONFIG_MESH_ROUTE_TABLE_SIZE];
+        int nnew = 0;
         acked = 0;
         xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
-        for (int i = 0; i < s_target_count; i++) if (s_targets[i].acked) acked++;
+        for (int i = 0; i < s_target_count; i++) {
+            if (!s_targets[i].acked) continue;
+            acked++;
+            if (!reported[i]) {
+                reported[i] = true;
+                memcpy(newmac[nnew], s_targets[i].mac, 6);
+                newst[nnew] = s_targets[i].status;
+                nnew++;
+            }
+        }
         xSemaphoreGive(s_dist_mutex);
+        for (int k = 0; k < nnew; k++) ota_report_ack(newmac[k], newst[k]);
         if (acked >= N) break;
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -269,6 +376,7 @@ static void ota_mesh_distribute_task(void *arg)
     }
     xSemaphoreGive(s_dist_mutex);
     ESP_LOGI(MESH_TAG, "[OTA] distribuição concluída: %d/%d confirmado(s)", acked, N);
+    ota_report_done_mesh();   /* Flask marca alvos ainda 'pendentes' como timeout */
 
 done_active:
     s_dist_active = false;
@@ -314,8 +422,15 @@ void trigger_ota(const char *url, const char *name, const uint8_t *target_mac)
     if (strstr(name, "Gateway")) {
         ESP_LOGI(MESH_TAG, "[OTA] Arquivo recebido: %s", name);
         ESP_LOGI(MESH_TAG, "[OTA] Destino: ROOT (self-update)");
-        char *copy = strdup(url);
-        if (copy) xTaskCreate(ota_self_update_task, "ota_self", 8192, copy, 5, NULL);
+        ota_self_arg_t *sa = calloc(1, sizeof(*sa));
+        if (sa) {
+            snprintf(sa->url,  sizeof(sa->url),  "%s", url);
+            snprintf(sa->name, sizeof(sa->name), "%s", name);
+            if (xTaskCreate(ota_self_update_task, "ota_self", 8192, sa, 5, NULL) != pdPASS) {
+                ESP_LOGE(MESH_TAG, "[OTA] xTaskCreate(ota_self) falhou");
+                free(sa);
+            }
+        }
     } else if (strstr(name, "Driver") || strstr(name, "Driver-1") || strstr(name, "Driver-3")) {
         ESP_LOGI(MESH_TAG, "[OTA] Arquivo recebido: %s", name);
         ESP_LOGI(MESH_TAG, "[OTA] Destino: nos via Mesh");
