@@ -64,6 +64,8 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t msg_id;                 /* = BIN_MSG_OTA_ACK                        */
     uint8_t  status;                 /* OTA_ACK_OK / OTA_ACK_FAIL                */
+    uint32_t expected_offset;        /* próximo offset que o node quer receber   */
+                                     /* 0 quando status=OTA_ACK_FAIL             */
 } ota_ack_t;
 
 #define OTA_ACK_FAIL  0

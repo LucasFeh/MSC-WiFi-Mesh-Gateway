@@ -38,15 +38,25 @@ static void ota_print_progress(const char *tag, size_t written, size_t total)
 /* -------------------------------------------------------------------------- */
 /* Estado da distribuição via mesh (Fluxo B) + coleta de ACK dos nós.         */
 typedef struct {
-    uint8_t mac[6];
-    bool    acked;
-    uint8_t status;          /* OTA_ACK_OK / OTA_ACK_FAIL */
+    uint8_t  mac[6];
+    bool     acked;             /* concluiu o OTA (END confirmado OK)             */
+    uint8_t  status;            /* OTA_ACK_OK / OTA_ACK_FAIL                       */
+    uint32_t expected_offset;   /* último offset que o nó pediu (stop-and-wait)   */
+    bool     have_ack;          /* recebeu ACK desde o último ponto de sincronia  */
+    bool     failed;            /* reportou FAIL ou esgotou as retransmissões     */
 } ota_target_t;
 
 static ota_target_t      s_targets[CONFIG_MESH_ROUTE_TABLE_SIZE];
 static int               s_target_count = 0;
 static volatile bool     s_dist_active  = false;
 static SemaphoreHandle_t s_dist_mutex   = NULL;
+
+/* Stop-and-wait ARQ: cada pacote OTA é confirmado pelo nó (campo expected_offset
+ * do ota_ack_t) antes de o root avançar. Sem ACK em OTA_ACK_TIMEOUT_MS o root
+ * retransmite o MESMO pacote; após OTA_MAX_RETRIES tentativas o nó é marcado
+ * 'failed' e a distribuição segue com os demais. */
+#define OTA_ACK_TIMEOUT_MS   2000
+#define OTA_MAX_RETRIES      5
 
 /* Argumento da task de distribuição via mesh. Quando 'unicast' é true, o alvo é
  * 'mac' (um único nó); caso contrário a lista de alvos vem da routing table.
@@ -139,25 +149,35 @@ static void ota_report_done_self(const char *status)
     post_ota_event(body);
 }
 
-/* Chamado pelo RX da mesh (mesh_main.c) ao receber um OTA_ACK de um nó. */
-void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status)
+/* Chamado pelo RX da mesh (mesh_main.c) a cada OTA_ACK de um nó. Atualiza o
+ * progresso do stop-and-wait: 'expected_offset' é o próximo offset que o nó quer
+ * receber. status=FAIL marca o nó como perdido (será pulado no resto do envio). */
+void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status, uint32_t expected_offset)
 {
     if (!s_dist_mutex || !s_dist_active) return;
     xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
     for (int i = 0; i < s_target_count; i++) {
         if (memcmp(s_targets[i].mac, from_mac, 6) == 0) {
-            s_targets[i].acked  = true;
-            s_targets[i].status = status;
+            s_targets[i].status          = status;
+            s_targets[i].expected_offset = expected_offset;
+            s_targets[i].have_ack        = true;
+            if (status == OTA_ACK_FAIL) s_targets[i].failed = true;
             break;
         }
     }
     xSemaphoreGive(s_dist_mutex);
-    ESP_LOGI(MESH_TAG, "[OTA] ACK de "MACSTR" status=%u", MAC2STR(from_mac), status);
+    ESP_LOGI(MESH_TAG, "[OTA] ACK de "MACSTR" status=%u next=%u",
+             MAC2STR(from_mac), status, (unsigned)expected_offset);
 }
 
-/* Envia 'size' bytes de 'pkt' para cada nó alvo (envio direcionado por MAC,
- * MESH_TOS_P2P). esp_mesh_send: docs ESP-WIFI-MESH (ver ota_protocol.h). */
-static void ota_send_to_all(const ota_packet_t *pkt, size_t size)
+/* Stop-and-wait ARQ. Envia 'pkt' (size bytes) aos alvos ainda ativos que não
+ * confirmaram 'want_offset' e aguarda o OTA_ACK de cada um (expected_offset >=
+ * want_offset). Retransmite os atrasados a cada OTA_ACK_TIMEOUT_MS; após
+ * OTA_MAX_RETRIES tentativas marca o nó como 'failed' e segue com os demais.
+ * Retorna o nº de nós ainda ativos (não 'failed'); 0 = todos perdidos.
+ * O esp_mesh_send roda FORA do mutex p/ não travar o RX (ota_root_register_ack).
+ * esp_mesh_send: docs ESP-WIFI-MESH (ver ota_protocol.h). */
+static int ota_send_chunk_sync(const ota_packet_t *pkt, size_t size, uint32_t want_offset)
 {
     mesh_data_t d = {
         .data  = (uint8_t *)pkt,
@@ -165,13 +185,74 @@ static void ota_send_to_all(const ota_packet_t *pkt, size_t size)
         .proto = MESH_PROTO_BIN,
         .tos   = MESH_TOS_P2P,
     };
-    for (int i = 0; i < s_target_count; i++) {
-        mesh_addr_t to;
-        memcpy(to.addr, s_targets[i].mac, 6);
-        esp_err_t e = esp_mesh_send(&to, &d, MESH_DATA_P2P, NULL, 0);
-        if (e != ESP_OK)
-            ESP_LOGW(MESH_TAG, "[OTA] send -> "MACSTR" err 0x%x", MAC2STR(to.addr), e);
+
+    /* Só contam ACKs deste want_offset: zera have_ack dos alvos ativos. */
+    xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_target_count; i++)
+        if (!s_targets[i].failed) s_targets[i].have_ack = false;
+    xSemaphoreGive(s_dist_mutex);
+
+    for (int attempt = 0; attempt < OTA_MAX_RETRIES; attempt++) {
+        /* Snapshot (sob mutex) dos alvos que ainda precisam receber o pacote. */
+        mesh_addr_t pend[CONFIG_MESH_ROUTE_TABLE_SIZE];
+        int npend = 0, active = 0;
+        xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
+        for (int i = 0; i < s_target_count; i++) {
+            if (s_targets[i].failed) continue;
+            active++;
+            if (s_targets[i].have_ack && s_targets[i].expected_offset >= want_offset) continue;
+            memcpy(pend[npend++].addr, s_targets[i].mac, 6);
+        }
+        xSemaphoreGive(s_dist_mutex);
+
+        if (active == 0) return 0;          /* todos os nós já falharam          */
+        if (npend  == 0) return active;     /* todos confirmaram este want_offset */
+
+        for (int k = 0; k < npend; k++) {
+            esp_err_t e = esp_mesh_send(&pend[k], &d, MESH_DATA_P2P, NULL, 0);
+            if (e != ESP_OK)
+                ESP_LOGW(MESH_TAG, "[OTA] send -> "MACSTR" err 0x%x (tent %d/%d @off %u)",
+                         MAC2STR(pend[k].addr), e, attempt + 1, OTA_MAX_RETRIES,
+                         (unsigned)want_offset);
+        }
+
+        /* Aguarda os ACKs chegarem (ota_root_register_ack atualiza s_targets). */
+        TickType_t start = xTaskGetTickCount();
+        while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(OTA_ACK_TIMEOUT_MS)) {
+            bool all_ok = true; int act = 0;
+            xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
+            for (int i = 0; i < s_target_count; i++) {
+                if (s_targets[i].failed) continue;
+                act++;
+                if (!(s_targets[i].have_ack && s_targets[i].expected_offset >= want_offset))
+                    all_ok = false;
+            }
+            xSemaphoreGive(s_dist_mutex);
+            if (act == 0)  return 0;
+            if (all_ok)    return act;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (attempt + 1 < OTA_MAX_RETRIES)
+            ESP_LOGW(MESH_TAG, "[OTA] timeout @off %u — retransmitindo (tent %d/%d)",
+                     (unsigned)want_offset, attempt + 1, OTA_MAX_RETRIES);
     }
+
+    /* Tentativas esgotadas: marca 'failed' quem não confirmou want_offset. */
+    int active = 0;
+    xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_target_count; i++) {
+        if (s_targets[i].failed) continue;
+        if (s_targets[i].have_ack && s_targets[i].expected_offset >= want_offset) {
+            active++;
+        } else {
+            s_targets[i].failed = true;
+            s_targets[i].status = OTA_ACK_FAIL;
+            ESP_LOGE(MESH_TAG, "[OTA] no "MACSTR" perdido @off %u (%d tentativas) — pulando",
+                     MAC2STR(s_targets[i].mac), (unsigned)want_offset, OTA_MAX_RETRIES);
+        }
+    }
+    xSemaphoreGive(s_dist_mutex);
+    return active;
 }
 
 /* ========================================================================== */
@@ -256,8 +337,11 @@ static void ota_mesh_distribute_task(void *arg)
     s_target_count = 0;
     if (a->unicast) {
         memcpy(s_targets[0].mac, a->mac, 6);
-        s_targets[0].acked  = false;
-        s_targets[0].status = OTA_ACK_FAIL;
+        s_targets[0].acked           = false;
+        s_targets[0].status          = OTA_ACK_FAIL;
+        s_targets[0].expected_offset = 0;
+        s_targets[0].have_ack        = false;
+        s_targets[0].failed          = false;
         s_target_count = 1;
     } else {
         mesh_addr_t route[CONFIG_MESH_ROUTE_TABLE_SIZE];
@@ -271,8 +355,11 @@ static void ota_mesh_distribute_task(void *arg)
         for (int i = 0; i < route_size && s_target_count < CONFIG_MESH_ROUTE_TABLE_SIZE; i++) {
             if (memcmp(route[i].addr, self_mac, 6) == 0) continue;   /* não envia para si */
             memcpy(s_targets[s_target_count].mac, route[i].addr, 6);
-            s_targets[s_target_count].acked  = false;
-            s_targets[s_target_count].status = OTA_ACK_FAIL;
+            s_targets[s_target_count].acked           = false;
+            s_targets[s_target_count].status          = OTA_ACK_FAIL;
+            s_targets[s_target_count].expected_offset = 0;
+            s_targets[s_target_count].have_ack        = false;
+            s_targets[s_target_count].failed          = false;
             s_target_count++;
         }
     }
@@ -311,7 +398,11 @@ static void ota_mesh_distribute_task(void *arg)
     memcpy(pkt->payload, a->name, namelen);
     pkt->payload[namelen] = '\0';
     pkt->chunk_size = (uint32_t)(namelen + 1);   /* inclui o terminador */
-    ota_send_to_all(pkt, OTA_HDR_SIZE + namelen + 1);
+    if (ota_send_chunk_sync(pkt, OTA_HDR_SIZE + namelen + 1, 0) == 0) {
+        ESP_LOGE(MESH_TAG, "[OTA] nenhum nó confirmou o BEGIN — abortando");
+        free(pkt); esp_http_client_close(http); esp_http_client_cleanup(http);
+        goto done_active;
+    }
 
     /* 2b) CHUNKs em fluxo. */
     size_t sent = 0; uint32_t offset = 0; int last_pct = -1; int last_rep = -1; int r;
@@ -319,8 +410,13 @@ static void ota_mesh_distribute_task(void *arg)
         pkt->msg_id = BIN_MSG_OTA; pkt->tipo = OTA_CHUNK;
         pkt->total = (uint32_t)total; pkt->offset = offset; pkt->chunk_size = (uint32_t)r;
         pkt->crc = esp_rom_crc32_le(0, pkt->payload, r);   /* [SEM FONTE: esp_rom_crc32_le] — CRC32 do ROM do ESP-IDF (esp_rom/include/esp_rom_crc.h) */
-        ota_send_to_all(pkt, OTA_HDR_SIZE + (size_t)r);
-        offset += (uint32_t)r; sent += (size_t)r;
+        uint32_t want = offset + (uint32_t)r;
+        if (ota_send_chunk_sync(pkt, OTA_HDR_SIZE + (size_t)r, want) == 0) {
+            ESP_LOGE(MESH_TAG, "[OTA] todos os nós perdidos @off %u — interrompendo envio",
+                     (unsigned)offset);
+            break;
+        }
+        offset = want; sent += (size_t)r;
         int pct = (int)((uint64_t)sent * 100 / (uint64_t)total);
         if (pct != last_pct) { ota_print_progress("mesh", sent, total); last_pct = pct; }
         if (pct / 10 != last_rep / 10) { last_rep = pct; ota_report_progress(pct); }  /* throttle ~10% */
@@ -329,53 +425,40 @@ static void ota_mesh_distribute_task(void *arg)
     /* 2c) END (só cabeçalho). */
     pkt->msg_id = BIN_MSG_OTA; pkt->tipo = OTA_END;
     pkt->total = (uint32_t)total; pkt->offset = offset; pkt->chunk_size = 0; pkt->crc = 0;
-    ota_send_to_all(pkt, OTA_HDR_SIZE);
+    ota_send_chunk_sync(pkt, OTA_HDR_SIZE, (uint32_t)total);
 
     free(pkt);
     esp_http_client_close(http);
     esp_http_client_cleanup(http);
 
-    /* 3) Aguarda ACK de cada nó (timeout 30 s). ROOT NÃO reinicia. */
-    ESP_LOGI(MESH_TAG, "[OTA] envio concluído, aguardando ACK de %d nó(s)...", N);
-    TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout = pdMS_TO_TICKS(30000);
-    int acked = 0;
-    bool reported[CONFIG_MESH_ROUTE_TABLE_SIZE];
-    memset(reported, 0, sizeof(reported));
-    while ((xTaskGetTickCount() - start) < timeout) {
-        /* Snapshot dos ACKs novos sob mutex; o POST de telemetria vai fora dele
-           para não bloquear o RX da mesh (que chama ota_root_register_ack). */
-        uint8_t newmac[CONFIG_MESH_ROUTE_TABLE_SIZE][6];
-        uint8_t newst[CONFIG_MESH_ROUTE_TABLE_SIZE];
-        int nnew = 0;
-        acked = 0;
-        xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
-        for (int i = 0; i < s_target_count; i++) {
-            if (!s_targets[i].acked) continue;
-            acked++;
-            if (!reported[i]) {
-                reported[i] = true;
-                memcpy(newmac[nnew], s_targets[i].mac, 6);
-                newst[nnew] = s_targets[i].status;
-                nnew++;
-            }
-        }
-        xSemaphoreGive(s_dist_mutex);
-        for (int k = 0; k < nnew; k++) ota_report_ack(newmac[k], newst[k]);
-        if (acked >= N) break;
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-
+    /* 3) O stop-and-wait já confirmou cada pacote inline. Consolida o status
+     *    final: quem chegou ao 'total' sem falhar concluiu (OK); o resto falhou.
+     *    ROOT NÃO reinicia. */
+    int ok = 0;
+    uint8_t rmac[CONFIG_MESH_ROUTE_TABLE_SIZE][6];
+    uint8_t rst[CONFIG_MESH_ROUTE_TABLE_SIZE];
+    int rn = 0;
     xSemaphoreTake(s_dist_mutex, portMAX_DELAY);
     for (int i = 0; i < s_target_count; i++) {
-        if (!s_targets[i].acked)
-            ESP_LOGW(MESH_TAG, "[OTA] nó "MACSTR": SEM ACK (timeout)", MAC2STR(s_targets[i].mac));
-        else
-            ESP_LOGI(MESH_TAG, "[OTA] nó "MACSTR": %s", MAC2STR(s_targets[i].mac),
-                     s_targets[i].status == OTA_ACK_OK ? "OK" : "FALHOU");
+        bool done = !s_targets[i].failed && s_targets[i].expected_offset >= (uint32_t)total;
+        s_targets[i].acked  = done;
+        s_targets[i].status = done ? OTA_ACK_OK : OTA_ACK_FAIL;
+        if (done) ok++;
+        memcpy(rmac[rn], s_targets[i].mac, 6);
+        rst[rn] = s_targets[i].status;
+        rn++;
     }
     xSemaphoreGive(s_dist_mutex);
-    ESP_LOGI(MESH_TAG, "[OTA] distribuição concluída: %d/%d confirmado(s)", acked, N);
+
+    /* Telemetria e log fora do mutex (o POST HTTP não pode bloquear o RX). */
+    for (int i = 0; i < rn; i++) {
+        if (rst[i] == OTA_ACK_OK)
+            ESP_LOGI(MESH_TAG, "[OTA] nó "MACSTR": OK", MAC2STR(rmac[i]));
+        else
+            ESP_LOGW(MESH_TAG, "[OTA] nó "MACSTR": FALHOU/timeout", MAC2STR(rmac[i]));
+        ota_report_ack(rmac[i], rst[i]);
+    }
+    ESP_LOGI(MESH_TAG, "[OTA] distribuição concluída: %d/%d confirmado(s)", ok, N);
     ota_report_done_mesh();   /* Flask marca alvos ainda 'pendentes' como timeout */
 
 done_active:

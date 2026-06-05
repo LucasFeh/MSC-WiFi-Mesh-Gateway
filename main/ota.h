@@ -15,8 +15,9 @@
  * O log [OTA] com o destino é impresso ANTES de qualquer operação OTA. */
 void trigger_ota(const char *url, const char *name, const uint8_t *target_mac);
 
-/* Registra o OTA_ACK de um nó (chamado pelo RX da mesh, Fluxo B). */
-void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status);
+/* Registra o OTA_ACK de um nó (chamado pelo RX da mesh, Fluxo B). 'expected_offset'
+ * é o próximo offset que o nó quer receber (stop-and-wait ARQ; 0 em status=FAIL). */
+void ota_root_register_ack(const uint8_t from_mac[6], uint8_t status, uint32_t expected_offset);
 
 /* Liga/desliga a telemetria OTA para o Flask (comando WS "OTAMON").
    Desligado por padrão: com OFF o ROOT não emite nenhum POST de progresso. */

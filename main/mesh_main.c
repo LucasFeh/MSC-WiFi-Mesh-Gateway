@@ -140,7 +140,7 @@ void start_mesh(void)
 
 void app_main(void)
 {
-    esp_ota_mark_app_valid_cancel_rollback();
+    // esp_ota_mark_app_valid_cancel_rollback();
     esp_log_level_set("*", ESP_LOG_NONE);
     esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
@@ -211,9 +211,10 @@ void esp_mesh_p2p_rx_main(void *arg)
                     break;
 
                 case BIN_MSG_OTA_ACK: {
-                    /* Confirmação de entrega de OTA vinda de um nó (Fluxo B). */
+                    /* Confirmação (stop-and-wait) de um nó: status + expected_offset. */
                     ota_ack_t *ack = (ota_ack_t *)data.data;
-                    ota_root_register_ack(from.addr, ack->status);
+                    uint32_t eo = (data.size >= sizeof(ota_ack_t)) ? ack->expected_offset : 0;
+                    ota_root_register_ack(from.addr, ack->status, eo);
                     break;
                 }
             }
