@@ -59,6 +59,15 @@
             <button onclick="dispararLeitura()" class="ota-btn" id="readBtn">Disparar Leitura</button>
             <div id="readStatus" class="ota-status"></div>
         </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Reset Remoto</div>
+            <div class="ota-unicast-row">
+                <button type="button" class="ota-btn" id="resetPickBtn" onclick="openResetMacModal()">Selecionar nó</button>
+                <span class="ota-target" id="resetTarget"></span>
+            </div>
+            <button onclick="sendReset()" class="ota-btn" id="resetBtn" disabled>Enviar Reset</button>
+            <div id="resetStatus" class="ota-status"></div>
+        </div>
     </div>
 
     <section class="ota-monitor" id="otaMonitor">

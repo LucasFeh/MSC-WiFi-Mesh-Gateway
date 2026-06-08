@@ -321,6 +321,16 @@ def ota_state():
     return jsonify(_ota_payload())
 
 
+@app.post("/api/reset")
+def reset_node():
+    payload = request.get_json(silent=True) or {}
+    target = (payload.get("target") or "").strip().lower()
+    if not target:
+        return jsonify({"ok": False, "error": "missing target"}), 400
+    pushed = _push_to_root({"cmd": "RESET", "target": target})
+    return jsonify({"ok": True, "target": target, "pushed": pushed})
+
+
 @app.get("/")
 def index():
     return render_template("index.html")

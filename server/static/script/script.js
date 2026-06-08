@@ -140,26 +140,39 @@ document.getElementById("fwFile").addEventListener("change", function () {
 
 /* ---- Unicast: escolher um MAC alvo num modal ---- */
 let unicastTarget = null;
+let resetTarget   = null;
+let _macModalOnSelect = null;
+let _macModalOnCancel = null;
 
 function updateTargetLabel() {
     const span = document.getElementById("otaTarget");
     span.textContent = unicastTarget ? `→ ${unicastTarget}` : "";
 }
 
-function closeMacModal() {
-    document.getElementById("macModal").hidden = true;
-    // Fechou sem escolher um alvo: desmarca o checkbox para manter o estado coerente.
-    if (!unicastTarget) document.getElementById("otaUnicast").checked = false;
+function updateResetTargetLabel() {
+    const span = document.getElementById("resetTarget");
+    span.textContent = resetTarget ? `→ ${resetTarget}` : "";
+    const btn = document.getElementById("resetBtn");
+    if (btn) btn.disabled = !resetTarget;
 }
 
-async function openMacModal() {
+function closeMacModal() {
+    document.getElementById("macModal").hidden = true;
+    if (_macModalOnCancel) { _macModalOnCancel(); }
+    _macModalOnSelect = null;
+    _macModalOnCancel = null;
+}
+
+async function openMacModal(onSelect, onCancel) {
+    _macModalOnSelect = onSelect || null;
+    _macModalOnCancel = onCancel || null;
     const modal = document.getElementById("macModal");
     const list = document.getElementById("macList");
     list.innerHTML = '<div class="empty">Carregando…</div>';
     modal.hidden = false;
     try {
         const s = await (await fetch("/api/state")).json();
-        const nodes = s.devices.filter(d => d.layer !== 1);   // exclui o ROOT
+        const nodes = s.devices.filter(d => d.layer !== 1);
         if (!nodes.length) {
             list.innerHTML = '<div class="empty">Nenhum nó disponível.</div>';
             return;
@@ -174,9 +187,11 @@ async function openMacModal() {
         `).join("");
         list.querySelectorAll(".mac-item").forEach(btn => {
             btn.addEventListener("click", () => {
-                unicastTarget = btn.dataset.mac;
-                updateTargetLabel();
+                const mac = btn.dataset.mac;
                 document.getElementById("macModal").hidden = true;
+                if (_macModalOnSelect) { _macModalOnSelect(mac); }
+                _macModalOnSelect = null;
+                _macModalOnCancel = null;
             });
         });
     } catch (e) {
@@ -186,7 +201,10 @@ async function openMacModal() {
 
 document.getElementById("otaUnicast").addEventListener("change", function () {
     if (this.checked) {
-        openMacModal();
+        openMacModal(
+            function(mac) { unicastTarget = mac; updateTargetLabel(); },
+            function()    { document.getElementById("otaUnicast").checked = false; }
+        );
     } else {
         unicastTarget = null;
         updateTargetLabel();
@@ -196,6 +214,13 @@ document.getElementById("macModalClose").addEventListener("click", closeMacModal
 document.getElementById("macModal").addEventListener("click", function (e) {
     if (e.target === this) closeMacModal();   // clique fora do card fecha
 });
+
+function openResetMacModal() {
+    openMacModal(
+        function(mac) { resetTarget = mac; updateResetTargetLabel(); },
+        null
+    );
+}
 
 async function sendOta() {
     const fileInput = document.getElementById("fwFile");
@@ -309,3 +334,37 @@ socket.on('ota_monitor_state', function (d) { setOtaMonitorEnabled(!!d.monitor_e
         renderOtaMonitor(await (await fetch("/api/ota/state")).json());
     } catch (e) { /* silencioso: monitor aparece ao primeiro evento */ }
 })();
+
+async function sendReset() {
+    if (!resetTarget) {
+        document.getElementById("resetStatus").textContent = "Selecione um n\u00f3 primeiro.";
+        document.getElementById("resetStatus").style.color = "#f59e0b";
+        return;
+    }
+    const status = document.getElementById("resetStatus");
+    const btn    = document.getElementById("resetBtn");
+    btn.disabled = true;
+    status.textContent = `Enviando reset para ${resetTarget}\u2026`;
+    status.style.color = "#94a3b8";
+    try {
+        const r = await fetch("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: resetTarget })
+        });
+        const d = await r.json();
+        if (d.ok) {
+            const aviso = d.pushed ? "ROOT notificado" : "ROOT offline \u2014 envio ignorado";
+            status.textContent = `Reset enviado para ${resetTarget}. ${aviso}.`;
+            status.style.color = d.pushed ? "#22c55e" : "#f59e0b";
+        } else {
+            status.textContent = "Erro: " + (d.error || "desconhecido");
+            status.style.color = "#ef4444";
+        }
+    } catch (e) {
+        status.textContent = "Erro: " + e.message;
+        status.style.color = "#ef4444";
+    } finally {
+        btn.disabled = false;
+    }
+}

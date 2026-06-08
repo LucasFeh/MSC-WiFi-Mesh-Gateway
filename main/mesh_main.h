@@ -51,6 +51,8 @@ extern bool is_mesh_connected;
 extern bool is_got_ip;
 
 /* Flags de sinalização RX → TX */
+extern volatile bool pending_reboot_unicast;  /* root: reboot unicast agendado     */
+extern uint8_t reboot_unicast_mac[6];         /* MAC alvo do reboot unicast        */
 
 
 

@@ -9,6 +9,8 @@ bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
 volatile bool pending_reboot = false;
+volatile bool pending_reboot_unicast = false;  /* reboot unicast para MAC específico */
+uint8_t reboot_unicast_mac[6] = {0};
 
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static mesh_addr_t mesh_parent_addr;
@@ -282,6 +284,20 @@ void esp_mesh_p2p_tx_main(void *arg)
             }
         }
 
+        if (pending_reboot_unicast) {
+            pending_reboot_unicast = false;
+            uint16_t msg_id = BIN_MSG_REBOOT;
+            mesh_data_t tx = {
+                .data  = (uint8_t *)&msg_id,
+                .size  = sizeof(uint16_t),
+                .proto = MESH_PROTO_BIN,
+                .tos   = MESH_TOS_P2P,
+            };
+            mesh_addr_t dest;
+            memcpy(dest.addr, reboot_unicast_mac, 6);
+            esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
+            ESP_LOGI(MESH_TAG, "[TX] REBOOT unicast -> "MACSTR, MAC2STR(dest.addr));
+        }
 
         TickType_t now = xTaskGetTickCount();
         if (now - last_status_tick >= pdMS_TO_TICKS(5000)) {

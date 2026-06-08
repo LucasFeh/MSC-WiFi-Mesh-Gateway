@@ -95,6 +95,17 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
         } else if (strstr(buf, "READ")) {
             ESP_LOGI(MESH_TAG, "[WS] READ_REQUEST recebido");
             pending_read_broadcast = true;
+        } else if (strstr(buf, "\"RESET\"")) {
+            char target[24];
+            uint8_t mac[6];
+            if (ws_json_str(buf, "target", target, sizeof(target)) &&
+                parse_mac(target, mac)) {
+                memcpy(reboot_unicast_mac, mac, 6);
+                pending_reboot_unicast = true;
+                ESP_LOGI(MESH_TAG, "[WS] RESET unicast -> %s", target);
+            } else {
+                ESP_LOGW(MESH_TAG, "[WS] RESET sem target valido: %s", buf);
+            }
         }
     } else if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         flask_connected = true;
