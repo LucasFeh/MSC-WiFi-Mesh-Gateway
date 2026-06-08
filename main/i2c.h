@@ -42,6 +42,7 @@ extern volatile int      i2c_mac_count;
 extern SemaphoreHandle_t i2c_macs_mutex;
 
 extern volatile bool pending_read_broadcast;  
+extern volatile bool pending_reboot;  
 /* Leituras de mesh por-MAC (alinhadas por índice com i2c_macs[]), consumidas pelo
    onRequest I2C. Populadas no RX da mesh (BIN_MSG_READ_RESPONSE); rTCounter conta
    ciclos de broadcast sem resposta — ao atingir 3 o sensor é reportado zerado.

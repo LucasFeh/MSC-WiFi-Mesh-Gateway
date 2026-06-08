@@ -110,6 +110,11 @@ static void i2c_on_receive(const char *buffer)
         return;
     }
 
+    if (strcmp(buffer, "REBOOT") == 0) {
+        pending_reboot = true;
+        return;
+    }
+
     if (strcmp(buffer, "RBOT_I2C") == 0) {
         esp_restart();
         return;

@@ -26,6 +26,7 @@
 #define BIN_MSG_READ_REQUEST    0x0002
 #define BIN_MSG_READ_RESPONSE   0x0003
 #define BIN_MSG_STATUS          0x0004
+#define BIN_MSG_REBOOT          0x0005
 
 extern esp_netif_t *netif_sta;
 
@@ -58,7 +59,7 @@ void esp_mesh_p2p_rx_main(void *arg);
 void esp_mesh_p2p_tx_main(void *arg);
 void mac_to_str(const uint8_t mac[6], char *out /* >=18 bytes */);
 void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
-
+void read_timer(void *arg);
 
 void start_mesh(void);
 esp_err_t esp_mesh_comm_p2p_start(void);

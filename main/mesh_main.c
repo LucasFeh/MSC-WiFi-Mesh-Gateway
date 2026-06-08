@@ -8,6 +8,7 @@ const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66 };
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
+volatile bool pending_reboot = false;
 
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static mesh_addr_t mesh_parent_addr;
@@ -37,6 +38,7 @@ esp_err_t esp_mesh_comm_p2p_start(void)
         is_comm_p2p_started = true;
         xTaskCreate(esp_mesh_p2p_tx_main, "MPTX", 8192, NULL, 5, NULL);
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 8192, NULL, 5, NULL);
+        xTaskCreate(read_timer, "RHT", 8192, NULL, 5, NULL);
     }
     return ESP_OK;
 }
@@ -228,6 +230,10 @@ void esp_mesh_p2p_tx_main(void *arg)
     static TickType_t last_status_tick = 0;
 
     while (1) {
+        /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
+        uint8_t local_macs[MAX_MACS][6];
+        int local_count = 0;
+
         if (pending_read_broadcast) {
             pending_read_broadcast = false;
             uint16_t msg_id = BIN_MSG_READ_REQUEST;
@@ -238,9 +244,6 @@ void esp_mesh_p2p_tx_main(void *arg)
                 .tos   = MESH_TOS_P2P,
             };
 
-            /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
-            uint8_t local_macs[MAX_MACS][6];
-            int local_count = 0;
             if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 local_count = i2c_mac_count;
                 memcpy(local_macs, i2c_macs, local_count * 6);
@@ -258,6 +261,24 @@ void esp_mesh_p2p_tx_main(void *arg)
                 memcpy(dest.addr, local_macs[i], 6);
                 esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
                 ESP_LOGI(MESH_TAG, "[TX] READ_REQUEST -> "MACSTR, MAC2STR(dest.addr));
+            }
+        }
+
+        if(pending_reboot){
+            pending_reboot = false;
+            uint16_t msg_id = BIN_MSG_REBOOT;
+            mesh_data_t tx = {
+                .data  = (uint8_t *)&msg_id,
+                .size  = sizeof(uint16_t),
+                .proto = MESH_PROTO_BIN,
+                .tos   = MESH_TOS_P2P,
+            };
+
+            for (int i = 0; i < local_count; i++) {
+                mesh_addr_t dest;
+                memcpy(dest.addr, local_macs[i], 6);
+                esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
+                ESP_LOGI(MESH_TAG, "[TX] REBOOT -> "MACSTR, MAC2STR(dest.addr));
             }
         }
 
@@ -353,5 +374,14 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     }
     default:
         break;
+    }
+}
+
+
+void read_timer(void *arg)
+{
+    while (1) {
+        pending_read_broadcast = true;
+        vTaskDelay(pdMS_TO_TICKS(1000)*seconds);
     }
 }
