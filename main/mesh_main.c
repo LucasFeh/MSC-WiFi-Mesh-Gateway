@@ -3,7 +3,7 @@
 const char *MESH_TAG = "mesh_main";
 
 esp_netif_t *netif_sta = NULL;
-const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66 };
+const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x04};
 
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
@@ -122,11 +122,12 @@ void start_mesh(void)
 void app_main(void)
 {
     // esp_ota_mark_app_valid_cancel_rollback();
+    ext_wdt_init();
+    ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
-    esp_log_level_set("ROOT", ESP_LOG_INFO);
+    // esp_log_level_set("ROOT", ESP_LOG_INFO);
     // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
-
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
     xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */

@@ -114,8 +114,8 @@ static void i2c_on_receive(const char *buffer)
         pending_reboot = true;
         return;
     }
-
-    if (strcmp(buffer, "RBOT_I2C") == 0) {
+    if (strcmp(buffer, "UPDT_I2C") == 0) 
+    {
         esp_restart();
         return;
     }
@@ -189,7 +189,7 @@ static bool i2c_is_mac_token(const char *s)
  * ------------------------------------------------------------------------- */
 static void i2c_split_and_dispatch(const char *buffer)
 {
-    static const char *kw[] = { "CLICKED", "UNCOMMIT", "COMMIT", "CLEAR", "RBOT_I2C" };
+    static const char *kw[] = { "CLICKED", "UNCOMMIT", "COMMIT", "CLEAR", "RBOT_I2C", "UPDT_I2C", "REBOOT" };
     const char *p = buffer;
     char token[32];
 

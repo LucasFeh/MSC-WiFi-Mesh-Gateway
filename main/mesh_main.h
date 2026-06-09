@@ -17,6 +17,7 @@
 
 #include "ota.h"
 #include "i2c.h"
+#include "ext_watchdog.h"
 
 #define LED_ROOT_PIN        2
 #define RX_SIZE             (1500)
