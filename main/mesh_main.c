@@ -90,9 +90,9 @@ void start_mesh(void)
     cfg.channel = CONFIG_MESH_CHANNEL;
 
     cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
-    memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
-    memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
-            strlen(CONFIG_MESH_ROUTER_PASSWD));
+    memcpy((uint8_t *) &cfg.router.ssid, "MSC-DI251818-NSS004", cfg.router.ssid_len);
+    memcpy((uint8_t *) &cfg.router.password, "Di-Eletrons",
+            strlen("Di-Eletrons"));
 
     ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
