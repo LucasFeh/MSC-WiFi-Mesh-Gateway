@@ -89,7 +89,7 @@ void start_mesh(void)
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
     cfg.channel = CONFIG_MESH_CHANNEL;
 
-    cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
+    cfg.router.ssid_len = strlen("MSC-DI251818-NSS004");
     memcpy((uint8_t *) &cfg.router.ssid, "MSC-DI251818-NSS004", cfg.router.ssid_len);
     memcpy((uint8_t *) &cfg.router.password, "Di-Eletrons",
             strlen("Di-Eletrons"));
