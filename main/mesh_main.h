@@ -30,8 +30,7 @@
 
 extern esp_netif_t *netif_sta;
 
-/* MAC do nó que será sempre o root fixo */
-#define ROOT_MAC  { 0x08, 0xa6, 0xf7, 0x0c, 0x68, 0xc4 }
+
 extern const uint8_t MESH_ID[6];
 
 /* Grupo mesh para broadcast de leitura */

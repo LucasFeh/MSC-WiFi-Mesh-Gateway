@@ -9,11 +9,11 @@
 #include "esp_log.h"
 
 
-#define FLASK_SERVER_URL    "http://192.168.15.213:5000/api/log"
-#define FLASK_READING_URL   "http://192.168.15.213:5000/api/reading"
-#define FLASK_STATUS_URL    "http://192.168.15.213:5000/api/status"
-#define FLASK_OTA_PROGRESS_URL "http://192.168.15.213:5000/api/ota/progress"
-#define FLASK_WS_URL        "ws://192.168.15.213:5001"
+#define FLASK_SERVER_URL    "http://192.168.15.191:5000/api/log"
+#define FLASK_READING_URL   "http://192.168.15.191:5000/api/reading"
+#define FLASK_STATUS_URL    "http://192.168.15.191:5000/api/status"
+#define FLASK_OTA_PROGRESS_URL "http://192.168.15.191:5000/api/ota/progress"
+#define FLASK_WS_URL        "ws://192.168.15.191:5001"
 #define FW_VERSION          "1.0-GatewR"
 
 

@@ -67,17 +67,9 @@ void start_mesh(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    bool is_root_node = false;
     uint8_t self_mac[6];
-    const uint8_t root_mac[6] = ROOT_MAC;
     esp_wifi_get_mac(WIFI_IF_STA, self_mac);
-    if (memcmp(self_mac, root_mac, 6) == 0) {
-        ESP_LOGI(MESH_TAG, "[MESH] ROOT fixo identificado, iniciando como root");
-        gpio_set_level(LED_ROOT_PIN, 1);
-        is_root_node = true;
-    } else {
-        ESP_LOGI(MESH_TAG, "[MESH] nó não-root: aguardando root...");
-    }
+    ESP_LOGI("ROOT", "[MESH] ROOT fixo identificado, iniciando como root");
 
     ESP_ERROR_CHECK(esp_mesh_init());
     ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
@@ -96,15 +88,12 @@ void start_mesh(void)
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
     cfg.channel = CONFIG_MESH_CHANNEL;
-    if (is_root_node) {
-        cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
-        memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
-        memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
-               strlen(CONFIG_MESH_ROUTER_PASSWD));
-    } else {
-        cfg.router.ssid_len = strlen("MESH_NO_ROUTER");
-        memcpy((uint8_t *) &cfg.router.ssid, "MESH_NO_ROUTER", cfg.router.ssid_len);
-    }
+
+    cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
+    memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
+    memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
+            strlen(CONFIG_MESH_ROUTER_PASSWD));
+
     ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
     cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
@@ -113,29 +102,17 @@ void start_mesh(void)
     ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
 
     esp_mesh_fix_root(true);
-    if (is_root_node) {
-        esp_mesh_set_type(MESH_ROOT);
-    } else {
-        esp_mesh_set_type(MESH_NODE);
-    }
+    esp_mesh_set_type(MESH_ROOT);
+
 
     ESP_ERROR_CHECK(esp_mesh_start());
     esp_mesh_set_group_id((mesh_addr_t *)&MESH_GROUP_ADDR, 1);
-
-    if (!is_root_node) {
-        while (!is_mesh_connected) {
-            gpio_set_level(LED_ROOT_PIN, 1);
-            vTaskDelay(pdMS_TO_TICKS(150));
-            gpio_set_level(LED_ROOT_PIN, 0);
-            vTaskDelay(pdMS_TO_TICKS(150));
-        }
-    }
 
 #ifdef CONFIG_MESH_ENABLE_PS
     ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
     ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
 #endif
-    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",
+    ESP_LOGI("ROOT", "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",
              esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)" : "(tree)",
@@ -144,8 +121,9 @@ void start_mesh(void)
 
 void app_main(void)
 {
-    // esp_ota_mark_app_valid_cancel_rollback();
+    esp_ota_mark_app_valid_cancel_rollback();
     esp_log_level_set("*", ESP_LOG_NONE);
+    esp_log_level_set("ROOT", ESP_LOG_INFO);
     // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
 
