@@ -159,7 +159,7 @@ function closeMacModal() {
     _macModalOnCancel = null;
 }
 
-async function openMacModal(onSelect, onCancel) {
+async function openMacModal(onSelect, onCancel, includeRoot = false) {
     _macModalOnSelect = onSelect || null;
     _macModalOnCancel = onCancel || null;
     const modal = document.getElementById("macModal");
@@ -168,7 +168,8 @@ async function openMacModal(onSelect, onCancel) {
     modal.hidden = false;
     try {
         const s = await (await fetch("/api/state")).json();
-        const nodes = s.devices.filter(d => d.layer !== 1);
+        // OTA/Reset não miram o root; o "Marcar válido" passa includeRoot=true.
+        const nodes = s.devices.filter(d => includeRoot || d.layer !== 1);
         if (!nodes.length) {
             list.innerHTML = '<div class="empty">Nenhum nó disponível.</div>';
             return;
@@ -177,7 +178,7 @@ async function openMacModal(onSelect, onCancel) {
         list.innerHTML = nodes.map(d => `
             <button type="button" class="mac-item${d.online ? "" : " mac-off"}" data-mac="${d.mac}">
                 <span class="dot ${d.online ? "dot-on" : "dot-off"}"></span>
-                <span class="mono mac-item-mac">${d.mac}</span>
+                <span class="mono mac-item-mac">${d.mac}${d.layer === 1 ? '<span class="role-root">ROOT</span>' : ''}</span>
                 <span class="mac-item-meta">layer ${d.layer ?? "?"} · ${d.online ? "online" : "offline"}</span>
             </button>
         `).join("");
@@ -356,5 +357,61 @@ async function sendReset() {
         status.style.color = "#ef4444";
     } finally {
         btn.disabled = !selectedTarget;   // segue habilitado enquanto houver alvo
+    }
+}
+
+/* ---- "Marcar válido": seleção PRÓPRIA (inclui o root), separada do alvo OTA/Reset ---- */
+let selectedMarkValidTarget = null;
+
+function updateMarkValidUI() {
+    document.getElementById("mvTarget").textContent =
+        selectedMarkValidTarget ? `→ ${selectedMarkValidTarget}` : "";
+    const clearBtn = document.getElementById("mvClearBtn");
+    if (clearBtn) clearBtn.hidden = !selectedMarkValidTarget;
+    const btn = document.getElementById("markValidBtn");
+    if (btn) btn.disabled = !selectedMarkValidTarget;   // exige um alvo escolhido
+}
+
+function openMarkValidModal() {
+    openMacModal(function (mac) { selectedMarkValidTarget = mac; updateMarkValidUI(); }, null, true);
+}
+
+function clearMarkValidTarget() {
+    selectedMarkValidTarget = null;
+    updateMarkValidUI();
+}
+
+async function sendMarkValid() {
+    const status = document.getElementById("otaStatus");   // mesma linha de status do card
+    if (!selectedMarkValidTarget) {
+        status.textContent = "Selecione um alvo primeiro.";
+        status.style.color = "#f59e0b";
+        return;
+    }
+    if (!confirm(`Marcar o firmware como válido em ${selectedMarkValidTarget}?`)) return;
+    const btn = document.getElementById("markValidBtn");
+    btn.disabled = true;
+    status.textContent = `Enviando mark-valid para ${selectedMarkValidTarget}…`;
+    status.style.color = "#94a3b8";
+    try {
+        const r = await fetch("/api/markvalid", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: selectedMarkValidTarget })
+        });
+        const d = await r.json();
+        if (d.ok) {
+            const aviso = d.pushed ? "ROOT notificado" : "ROOT offline — envio ignorado";
+            status.textContent = `Mark-valid enviado para ${selectedMarkValidTarget}. ${aviso}.`;
+            status.style.color = d.pushed ? "#22c55e" : "#f59e0b";
+        } else {
+            status.textContent = "Erro: " + (d.error || "desconhecido");
+            status.style.color = "#ef4444";
+        }
+    } catch (e) {
+        status.textContent = "Erro: " + e.message;
+        status.style.color = "#ef4444";
+    } finally {
+        btn.disabled = !selectedMarkValidTarget;   // segue habilitado enquanto houver alvo
     }
 }

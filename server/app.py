@@ -124,7 +124,13 @@ async def _ws_root_handler(websocket):
         async for _ in websocket:
             pass
     finally:
-        _root_ws = None
+        # Só limpa se ESTE socket ainda é o atual. Quando o ROOT reseta, a conexão
+        # antiga só é detectada como morta (ping timeout) DEPOIS de o ROOT já ter
+        # reconectado e instalado a conexão nova. Sem essa checagem, o finally do
+        # handler antigo zeraria a conexão viva, deixando o Flask preso em
+        # "ROOT offline — envio ignorado" mesmo com o ROOT online.
+        if _root_ws is websocket:
+            _root_ws = None
 
 
 async def _ws_server():
@@ -328,6 +334,19 @@ def reset_node():
     if not target:
         return jsonify({"ok": False, "error": "missing target"}), 400
     pushed = _push_to_root({"cmd": "RESET", "target": target})
+    return jsonify({"ok": True, "target": target, "pushed": pushed})
+
+
+@app.post("/api/markvalid")
+def mark_valid_node():
+    """Pede ao ROOT para chamar esp_ota_mark_app_valid_cancel_rollback() no alvo.
+    Se o alvo for o próprio ROOT, ele executa localmente; senão repassa por unicast
+    na mesh (BIN_MSG_MARK_VALID). Fire-and-forget, como o RESET."""
+    payload = request.get_json(silent=True) or {}
+    target = (payload.get("target") or "").strip().lower()
+    if not target:
+        return jsonify({"ok": False, "error": "missing target"}), 400
+    pushed = _push_to_root({"cmd": "MARKVALID", "target": target})
     return jsonify({"ok": True, "target": target, "pushed": pushed})
 
 

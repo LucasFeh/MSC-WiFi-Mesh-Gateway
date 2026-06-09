@@ -106,6 +106,17 @@ static void ws_event_handler(void *arg, esp_event_base_t base,
             } else {
                 ESP_LOGW(MESH_TAG, "[WS] RESET sem target valido: %s", buf);
             }
+        } else if (strstr(buf, "MARKVALID")) {
+            char target[24];
+            uint8_t mac[6];
+            if (ws_json_str(buf, "target", target, sizeof(target)) &&
+                parse_mac(target, mac)) {
+                memcpy(mark_valid_mac, mac, 6);
+                pending_mark_valid = true;
+                ESP_LOGI(MESH_TAG, "[WS] MARK_VALID -> %s", target);
+            } else {
+                ESP_LOGW(MESH_TAG, "[WS] MARKVALID sem target valido: %s", buf);
+            }
         }
     } else if (event_id == WEBSOCKET_EVENT_CONNECTED) {
         flask_connected = true;

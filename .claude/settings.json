@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import flask, flask_socketio, websockets; print\\('deps OK', flask.__version__, websockets.__version__\\)\")",
+      "Bash(./ws_race_venv/Scripts/python.exe test_ws_race.py)",
+      "Bash(git -C \"d:/MICROCONTROLLER_DEV/MSC-WiFi-Mesh-Gateway\" status --short server/)"
+    ]
+  }
+}

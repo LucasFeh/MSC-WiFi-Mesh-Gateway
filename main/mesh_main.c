@@ -3,7 +3,7 @@
 const char *MESH_TAG = "mesh_main";
 
 esp_netif_t *netif_sta = NULL;
-const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x04};
+const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
 
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
@@ -11,6 +11,8 @@ volatile bool pending_read_broadcast = false;
 volatile bool pending_reboot = false;
 volatile bool pending_reboot_unicast = false;  /* reboot unicast para MAC específico */
 uint8_t reboot_unicast_mac[6] = {0};
+volatile bool pending_mark_valid = false;       /* mark-app-valid agendado (self ou unicast) */
+uint8_t mark_valid_mac[6] = {0};
 
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static mesh_addr_t mesh_parent_addr;
@@ -125,9 +127,9 @@ void app_main(void)
     ext_wdt_init();
     ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
-    // esp_log_level_set("ROOT", ESP_LOG_INFO);
-    // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
-    // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
+    esp_log_level_set("ROOT", ESP_LOG_INFO);
+    esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
     xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
@@ -270,6 +272,30 @@ void esp_mesh_p2p_tx_main(void *arg)
             memcpy(dest.addr, reboot_unicast_mac, 6);
             esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
             ESP_LOGI(MESH_TAG, "[TX] REBOOT unicast -> "MACSTR, MAC2STR(dest.addr));
+        }
+
+        if (pending_mark_valid) {
+            pending_mark_valid = false;
+            uint8_t self_mac[6];
+            esp_wifi_get_mac(WIFI_IF_STA, self_mac);
+            if (memcmp(mark_valid_mac, self_mac, 6) == 0) {
+                /* Alvo é o próprio ROOT: confirma a imagem localmente (não roteia
+                   pela mesh, pois esp_mesh_send para o próprio MAC não teria efeito). */
+                esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+                ESP_LOGI(MESH_TAG, "[MARK_VALID] self -> %s", esp_err_to_name(e));
+            } else {
+                uint16_t msg_id = BIN_MSG_MARK_VALID;
+                mesh_data_t tx = {
+                    .data  = (uint8_t *)&msg_id,
+                    .size  = sizeof(uint16_t),
+                    .proto = MESH_PROTO_BIN,
+                    .tos   = MESH_TOS_P2P,
+                };
+                mesh_addr_t dest;
+                memcpy(dest.addr, mark_valid_mac, 6);
+                esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
+                ESP_LOGI(MESH_TAG, "[TX] MARK_VALID unicast -> "MACSTR, MAC2STR(dest.addr));
+            }
         }
 
         TickType_t now = xTaskGetTickCount();

@@ -37,7 +37,7 @@
             </div>
         </div>
         <div class="kpi-card kpi-ota">
-            <div class="kpi-label">Firmware OTA / Reset</div>
+            <div class="kpi-label">Firmware OTA / Reset / Validar</div>
             <div class="ota-row">
                 <label class="ota-file-label" for="fwFile">
                     <span class="ota-file-name" id="fwFileName">Escolher .bin&hellip;</span>
@@ -56,6 +56,17 @@
                         onclick="clearTarget()" title="Limpar seleção" hidden>&times;</button>
                 <button onclick="sendReset()" class="ota-btn ota-btn-reset" id="resetBtn"
                         disabled>Reiniciar nó</button>
+            </div>
+            <!-- Marcar firmware válido: seletor PRÓPRIO que INCLUI o root, independente
+                 do alvo de OTA/Reset acima (que de propósito não mira o root). -->
+            <div class="ota-unicast-row">
+                <button type="button" class="ota-btn ota-btn-ghost" id="mvPickBtn"
+                        onclick="openMarkValidModal()">Selecionar (inclui root)</button>
+                <span class="ota-target" id="mvTarget"></span>
+                <button type="button" class="ota-target-clear" id="mvClearBtn"
+                        onclick="clearMarkValidTarget()" title="Limpar seleção" hidden>&times;</button>
+                <button onclick="sendMarkValid()" class="ota-btn ota-btn-reset" id="markValidBtn"
+                        disabled>Marcar válido</button>
             </div>
             <div id="otaStatus" class="ota-status"></div>
         </div>

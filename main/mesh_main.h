@@ -28,6 +28,7 @@
 #define BIN_MSG_READ_RESPONSE   0x0003
 #define BIN_MSG_STATUS          0x0004
 #define BIN_MSG_REBOOT          0x0005
+#define BIN_MSG_MARK_VALID      0x0006
 
 extern esp_netif_t *netif_sta;
 
@@ -53,6 +54,8 @@ extern bool is_got_ip;
 /* Flags de sinalização RX → TX */
 extern volatile bool pending_reboot_unicast;  /* root: reboot unicast agendado     */
 extern uint8_t reboot_unicast_mac[6];         /* MAC alvo do reboot unicast        */
+extern volatile bool pending_mark_valid;      /* root: mark-app-valid agendado     */
+extern uint8_t mark_valid_mac[6];             /* MAC alvo do mark-app-valid        */
 
 
 
