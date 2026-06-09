@@ -146,8 +146,8 @@ void app_main(void)
 {
     // esp_ota_mark_app_valid_cancel_rollback();
     esp_log_level_set("*", ESP_LOG_NONE);
-    esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
-    esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
+    // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
 
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
@@ -187,8 +187,6 @@ void esp_mesh_p2p_rx_main(void *arg)
                     /* Atualiza o store consumido pelo onRequest I2C (slave -> master):
                        casa o remetente com a lista i2c_macs[] e grava a leitura fresca,
                        zerando o contador de staleness. */
-                    if (i2c_macs_mutex &&
-                        xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                         for (int i = 0; i < i2c_mac_count; i++) {
                             if (memcmp(from.addr, i2c_macs[i], 6) == 0) {
                                 i2c_readings[i].ch1       = resp->ch1;
@@ -199,11 +197,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 break;
                             }
                         }
-                        xSemaphoreGive(i2c_macs_mutex);
-                    }
-
                     break;
-
                 case BIN_MSG_STATUS:
                     
                     status_msg_t *s = (status_msg_t *)data.data;

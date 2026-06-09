@@ -236,26 +236,6 @@ static void i2c_split_and_dispatch(const char *buffer)
     }
 }
 
-/* ---------------------------------------------------------------------------
- * Caminho slave -> master (porte do onRequest() do firmware Arduino).
- *
- * O driver legado (driver/i2c.h) NÃO tem callback de "master read" — os reads do
- * master são servidos silenciosamente pelo hardware a partir do ring buffer TX, e
- * o software NUNCA é notificado de que um read ocorreu (i2c_slave_read_buffer só
- * devolve o que o master ESCREVEU). Por isso não há como imprimir "a cada onRequest".
- *
- * O master fixo faz requestFrom(addr, I2C_REQUEST_STRIDE) em loop CONTÍNUO (sem
- * escrever antes), descartando os bytes de padding 0xFF/0x8f, e para ao ler "FIM".
- * Como o ring buffer é FIFO e persiste entre transações, a task i2c_slave_request_task
- * mantém o buffer continuamente reabastecido com blobs [um registro por MAC + "FIM"],
- * cada registro com EXATAMENTE I2C_REQUEST_STRIDE bytes. Assim cada requestFrom drena
- * um registro, reproduzindo o sendWireIndex++ do Arduino sem callback. O backpressure
- * do próprio ring buffer (a escrita bloqueia quando cheio) limita a "idade" dos dados
- * a ~1 ciclo. O ACK/NACK por byte é feito pelo hardware do periférico.
- * ------------------------------------------------------------------------- */
-
-/* Escreve 'text' no offset 'off' do blob e completa o registro com padding 0xFF
-   (descartado pelo master) até I2C_REQUEST_STRIDE. Retorna o novo offset. */
 static size_t i2c_emit_record(uint8_t *blob, size_t off, const char *text)
 {
     size_t tlen = strlen(text);
@@ -280,6 +260,10 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
         ESP_LOGI(TAG, "Nenhum MAC cadastrado: resposta com 'Vazio'");
     } else {
         for (int i = 0; i < count && off + I2C_REQUEST_STRIDE <= cap; i++) {
+            // ESP_LOGI(TAG, "Serializando leitura para MAC %d: %02x:%02x:%02x:%02x:%02x:%02x",
+            //          i, i2c_macs[i][0], i2c_macs[i][1], i2c_macs[i][2],
+            //             i2c_macs[i][3], i2c_macs[i][4], i2c_macs[i][5]);
+
             uint8_t ch1 = i2c_readings[i].ch1;
             uint8_t ch2 = i2c_readings[i].ch2;
             uint8_t ch3 = i2c_readings[i].ch3;

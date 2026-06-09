@@ -37,7 +37,7 @@
             </div>
         </div>
         <div class="kpi-card kpi-ota">
-            <div class="kpi-label">Firmware OTA</div>
+            <div class="kpi-label">Firmware OTA / Reset</div>
             <div class="ota-row">
                 <label class="ota-file-label" for="fwFile">
                     <span class="ota-file-name" id="fwFileName">Escolher .bin&hellip;</span>
@@ -46,11 +46,16 @@
                 </label>
                 <button onclick="sendOta()" class="ota-btn">Enviar OTA</button>
             </div>
+            <!-- Seleção de nó compartilhada: o MAC escolhido vale para o OTA (unicast)
+                 e para o Reset. Sem seleção, o OTA roteia por nome e o Reset fica travado. -->
             <div class="ota-unicast-row">
-                <label class="ota-unicast">
-                    <input type="checkbox" id="otaUnicast"> Enviar unicast
-                </label>
+                <button type="button" class="ota-btn ota-btn-ghost" id="targetPickBtn"
+                        onclick="openTargetMacModal()">Selecionar nó</button>
                 <span class="ota-target" id="otaTarget"></span>
+                <button type="button" class="ota-target-clear" id="targetClearBtn"
+                        onclick="clearTarget()" title="Limpar seleção" hidden>&times;</button>
+                <button onclick="sendReset()" class="ota-btn ota-btn-reset" id="resetBtn"
+                        disabled>Reiniciar nó</button>
             </div>
             <div id="otaStatus" class="ota-status"></div>
         </div>
@@ -58,15 +63,6 @@
             <div class="kpi-label">Leituras</div>
             <button onclick="dispararLeitura()" class="ota-btn" id="readBtn">Disparar Leitura</button>
             <div id="readStatus" class="ota-status"></div>
-        </div>
-        <div class="kpi-card">
-            <div class="kpi-label">Reset Remoto</div>
-            <div class="ota-unicast-row">
-                <button type="button" class="ota-btn" id="resetPickBtn" onclick="openResetMacModal()">Selecionar nó</button>
-                <span class="ota-target" id="resetTarget"></span>
-            </div>
-            <button onclick="sendReset()" class="ota-btn" id="resetBtn" disabled>Enviar Reset</button>
-            <div id="resetStatus" class="ota-status"></div>
         </div>
     </div>
 
