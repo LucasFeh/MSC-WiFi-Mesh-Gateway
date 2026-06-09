@@ -121,7 +121,7 @@ void start_mesh(void)
 
 void app_main(void)
 {
-    esp_ota_mark_app_valid_cancel_rollback();
+    // esp_ota_mark_app_valid_cancel_rollback();
     esp_log_level_set("*", ESP_LOG_NONE);
     esp_log_level_set("ROOT", ESP_LOG_INFO);
     // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
