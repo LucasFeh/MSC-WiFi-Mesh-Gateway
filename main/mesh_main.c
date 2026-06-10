@@ -5,6 +5,8 @@ const char *MESH_TAG = "mesh_main";
 esp_netif_t *netif_sta = NULL;
 const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
 
+char FW_VERSION[] = { VERSION, '-', 'G', 'a', 't', 'e', 'w', 'a', 'y', '-', 'R', '\0' };
+
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
@@ -123,7 +125,6 @@ void start_mesh(void)
 
 void app_main(void)
 {
-    // esp_ota_mark_app_valid_cancel_rollback();
     ext_wdt_init();
     ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
@@ -282,6 +283,8 @@ void esp_mesh_p2p_tx_main(void *arg)
                 /* Alvo é o próprio ROOT: confirma a imagem localmente (não roteia
                    pela mesh, pois esp_mesh_send para o próprio MAC não teria efeito). */
                 esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+                char *r_suffix = strstr(FW_VERSION, "-R");
+                if (r_suffix) *r_suffix = '\0';
                 ESP_LOGI(MESH_TAG, "[MARK_VALID] self -> %s", esp_err_to_name(e));
             } else {
                 uint16_t msg_id = BIN_MSG_MARK_VALID;

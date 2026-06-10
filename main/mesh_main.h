@@ -32,8 +32,10 @@
 
 extern esp_netif_t *netif_sta;
 
-
 extern const uint8_t MESH_ID[6];
+
+#define VERSION '1'
+extern char FW_VERSION[];
 
 /* Grupo mesh para broadcast de leitura */
 static const mesh_addr_t MESH_GROUP_ADDR = {.addr = {0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56}};

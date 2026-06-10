@@ -3,7 +3,11 @@
     "allow": [
       "Bash(python -c \"import flask, flask_socketio, websockets; print\\('deps OK', flask.__version__, websockets.__version__\\)\")",
       "Bash(./ws_race_venv/Scripts/python.exe test_ws_race.py)",
-      "Bash(git -C \"d:/MICROCONTROLLER_DEV/MSC-WiFi-Mesh-Gateway\" status --short server/)"
+      "Bash(git -C \"d:/MICROCONTROLLER_DEV/MSC-WiFi-Mesh-Gateway\" status --short server/)",
+      "Bash(ninja -C build)",
+      "Read(//c//**)",
+      "PowerShell(& C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1\\\\ninja.exe -C D:\\\\MICROCONTROLLER_DEV\\\\MSC-WiFi-Mesh-Gateway\\\\build main/CMakeFiles/__idf_main.dir/mesh_main.c.obj main/CMakeFiles/__idf_main.dir/flask_request.c.obj 2>&1)",
+      "PowerShell(& C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1\\\\ninja.exe -C D:\\\\MICROCONTROLLER_DEV\\\\MSC-WiFi-Mesh-Gateway\\\\build MSC-WiFi-Mesh-Gateway.elf 2>&1)"
     ]
   }
 }
