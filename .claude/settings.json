@@ -7,7 +7,23 @@
       "Bash(ninja -C build)",
       "Read(//c//**)",
       "PowerShell(& C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1\\\\ninja.exe -C D:\\\\MICROCONTROLLER_DEV\\\\MSC-WiFi-Mesh-Gateway\\\\build main/CMakeFiles/__idf_main.dir/mesh_main.c.obj main/CMakeFiles/__idf_main.dir/flask_request.c.obj 2>&1)",
-      "PowerShell(& C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1\\\\ninja.exe -C D:\\\\MICROCONTROLLER_DEV\\\\MSC-WiFi-Mesh-Gateway\\\\build MSC-WiFi-Mesh-Gateway.elf 2>&1)"
+      "PowerShell(& C:\\\\Espressif\\\\tools\\\\ninja\\\\1.12.1\\\\ninja.exe -C D:\\\\MICROCONTROLLER_DEV\\\\MSC-WiFi-Mesh-Gateway\\\\build MSC-WiFi-Mesh-Gateway.elf 2>&1)",
+      "Bash(pip show *)",
+      "Bash(python -m py_compile app.py)",
+      "PowerShell(Test-NetConnection -ComputerName 192.168.10.190 -Port 5000 -InformationLevel Detailed -WarningAction SilentlyContinue)",
+      "Bash(rm -f server.log)",
+      "Bash(python app.py)",
+      "Bash(grep -q \"\\\\[WS\\\\]\" server.log)",
+      "Bash(break)",
+      "Bash(\"C:/Users/Lucas/AppData/Local/Python/pythoncore-3.14-64/python.exe\" app.py)",
+      "Bash(curl -s -i --max-time 6 http://192.168.10.190:5000/)",
+      "Bash(echo \"=== exit: $? ===\")",
+      "Bash(\"C:/Users/Lucas/AppData/Local/Python/pythoncore-3.14-64/python.exe\" -)",
+      "Bash(\"C:/Users/Lucas/AppData/Local/Python/pythoncore-3.14-64/python.exe\" -c \"import simple_websocket, os; print\\(os.path.dirname\\(simple_websocket.__file__\\)\\)\")",
+      "PowerShell(Test-NetConnection -ComputerName 192.168.15.191 -Port 5000 -WarningAction SilentlyContinue)",
+      "Bash(curl -s -i --max-time 6 http://192.168.15.191:5000/)",
+      "Bash(echo \"\\(exit $?\\)\")",
+      "Bash(\"C:/Users/Lucas/AppData/Local/Python/pythoncore-3.14-64/python.exe\" -m py_compile app.py)"
     ]
   }
 }

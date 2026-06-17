@@ -1,9 +1,7 @@
 import os
 import json
 import socket
-import asyncio
-import threading
-import websockets
+import simple_websocket
 from datetime import datetime, timezone
 from threading import Lock
 
@@ -15,13 +13,18 @@ socketio = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
 
 ROOT_OFFLINE_TIMEOUT_S = 15
 
+# O Flask é o SERVIDOR WebSocket; o ROOT (esp_websocket_client) é o CLIENTE e
+# conecta em ws://<host>:5000 -> path "/". Servimos esse WS na MESMA porta 5000
+# do HTTP/Socket.IO, via um dispatcher WSGI (ver _RootWSDispatch, no fim).
+ROOT_WS_PATH = "/"
+
 _lock = Lock()
 _devices = {}
 _ota_pending_url = None
 _ota_pending_name = None
 _firmware_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware_upload.bin")
-_root_ws = None
-_ws_loop = None
+_root_ws = None            # simple_websocket.Server do ROOT conectado (ou None)
+_root_ws_lock = Lock()     # serializa envios vindos de threads diferentes
 
 # ── Monitor OTA ──────────────────────────────────────────────────────────────
 # Telemetria do ROOT durante o OTA. Desligada por padrão (o ROOT só reporta
@@ -91,11 +94,18 @@ def _emit_ota():
 
 
 def _push_to_root(obj: dict) -> bool:
-    """Empurra um comando JSON ao ROOT pelo WebSocket. False se o ROOT está off."""
-    if _root_ws is not None and _ws_loop is not None:
-        asyncio.run_coroutine_threadsafe(_root_ws.send(json.dumps(obj)), _ws_loop)
+    """Empurra um comando JSON ao ROOT pelo WebSocket. False se o ROOT está off
+    ou se o envio falhar. Protegido por lock: vários endpoints/threads podem
+    empurrar comandos (OTA/READ/RESET/MARKVALID/OTAMON) ao mesmo tempo."""
+    ws = _root_ws
+    if ws is None:
+        return False
+    try:
+        with _root_ws_lock:
+            ws.send(json.dumps(obj))
         return True
-    return False
+    except Exception:
+        return False
 
 
 def _watch_root():
@@ -112,46 +122,58 @@ def _watch_root():
             prev_online = curr_online
 
 
-async def _ws_root_handler(websocket):
+def _root_ws_handler(environ):
+    """Atende a conexão WebSocket crua do ROOT na MESMA porta 5000 (path "/").
+    O ROOT é o cliente (esp_websocket_client); aqui o Flask é o servidor. A
+    simple_websocket sequestra o socket no handshake; no fim devolvemos [] sem
+    chamar start_response (padrão do modo Werkzeug, igual ao engineio)."""
     global _root_ws
-    _root_ws = websocket
+    ws = simple_websocket.Server.accept(environ, ping_interval=25)
+    _root_ws = ws
+    print("[WS] ROOT conectado", flush=True)
     try:
-        # Re-sincroniza o estado do monitor com o ROOT recém-conectado (cobre o
-        # ROOT ter reiniciado, p.ex. após um self-update, perdendo o flag).
+        # Sincroniza o estado do monitor com o ROOT recém-conectado (cobre o ROOT
+        # ter reiniciado, p.ex. após um self-update, perdendo o flag).
         with _lock:
             on = _ota_monitor_enabled
-        await websocket.send(json.dumps({"cmd": "OTAMON", "on": on}))
-        async for _ in websocket:
-            pass
+        with _root_ws_lock:
+            ws.send(json.dumps({"cmd": "OTAMON", "on": on}))
+        while ws.connected:
+            if ws.receive() is None:   # bloqueia até chegar dado (ou a conexão cair)
+                break
+    except simple_websocket.ConnectionClosed:
+        pass
+    except Exception as e:
+        print(f"[WS] erro na conexão do ROOT: {e}", flush=True)
     finally:
-        # Só limpa se ESTE socket ainda é o atual. Quando o ROOT reseta, a conexão
-        # antiga só é detectada como morta (ping timeout) DEPOIS de o ROOT já ter
-        # reconectado e instalado a conexão nova. Sem essa checagem, o finally do
-        # handler antigo zeraria a conexão viva, deixando o Flask preso em
-        # "ROOT offline — envio ignorado" mesmo com o ROOT online.
-        if _root_ws is websocket:
+        if _root_ws is ws:
             _root_ws = None
+        try:
+            ws.close()
+        except Exception:
+            pass
+        print("[WS] ROOT desconectado", flush=True)
+    return []
 
 
-async def _ws_server():
-    async with websockets.serve(_ws_root_handler, "0.0.0.0", 5001):
-        await asyncio.Future()
+class _RootWSDispatch:
+    """Middleware WSGI na frente do Flask/Socket.IO: intercepta o upgrade do ROOT
+    em ROOT_WS_PATH e entrega ao handler cru; todo o resto (HTTP /api/*, páginas,
+    /socket.io/ do navegador) segue para o app normalmente, na mesma porta."""
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
 
-
-def _start_ws_thread():
-    global _ws_loop
-    _ws_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_ws_loop)
-    _ws_loop.run_until_complete(_ws_server())
+    def __call__(self, environ, start_response):
+        if (environ.get("PATH_INFO", "/") == ROOT_WS_PATH
+                and environ.get("HTTP_UPGRADE", "").lower() == "websocket"):
+            return _root_ws_handler(environ)
+        return self.wsgi_app(environ, start_response)
 
 
 @socketio.on('read_request')
 def handle_read_request():
-    global _root_ws, _ws_loop
-    if _root_ws is None or _ws_loop is None:
+    if not _push_to_root({"cmd": "READ"}):
         sio_emit('read_error', {'msg': 'Root não conectado'})
-        return
-    asyncio.run_coroutine_threadsafe(_root_ws.send('{"cmd":"READ"}'), _ws_loop)
 
 
 @socketio.on('set_ota_monitor')
@@ -241,14 +263,10 @@ def upload_firmware():
 
     # Empurra o comando OTA ao ROOT pelo WebSocket (mesmo canal do READ). O ROOT
     # decide a rota pelo nome (ou unicast, se 'target' vier) e baixa o .bin de ota_url.
-    pushed = False
-    if _root_ws is not None and _ws_loop is not None:
-        cmd = {"cmd": "OTA", "file": fname, "url": ota_url}
-        if target:
-            cmd["target"] = target
-        msg = json.dumps(cmd)
-        asyncio.run_coroutine_threadsafe(_root_ws.send(msg), _ws_loop)
-        pushed = True
+    cmd = {"cmd": "OTA", "file": fname, "url": ota_url}
+    if target:
+        cmd["target"] = target
+    pushed = _push_to_root(cmd)
 
     return jsonify({"ok": True, "fw_url": ota_url, "size": size,
                     "file": fname, "target": target or None, "pushed": pushed})
@@ -360,7 +378,10 @@ def topology():
     return render_template("mesh_tree.html")
 
 
+# Coloca o servidor WS cru na frente do Flask/Socket.IO, na mesma porta 5000.
+# (Tem de ser depois de SocketIO(app), que já embrulhou app.wsgi_app.)
+app.wsgi_app = _RootWSDispatch(app.wsgi_app)
+
 if __name__ == "__main__":
-    threading.Thread(target=_start_ws_thread, daemon=True).start()
     socketio.start_background_task(_watch_root)
     socketio.run(app, host="0.0.0.0", port=5000, debug=False)

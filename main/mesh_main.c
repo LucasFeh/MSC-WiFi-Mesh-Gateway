@@ -131,7 +131,7 @@ void app_main(void)
     ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
     // esp_log_level_set("ROOT", ESP_LOG_INFO);
-    esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
@@ -165,7 +165,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     read_response_t *resp = (read_response_t *)data.data;
                     char from_str[18];
                     mac_to_str(from.addr, from_str);
-                    ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d tensão: %0.2f", from_str, resp->ch1, resp->ch2, resp->ch3, resp->volts/ 15.6);
+                    // ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d tensão: %0.2f", from_str, resp->ch1, resp->ch2, resp->ch3, resp->volts/ 15.6);
                     post_reading_to_flask(from_str, resp->ch1, resp->ch2, resp->ch3);
 
                     /* Atualiza o store consumido pelo onRequest I2C (slave -> master):
