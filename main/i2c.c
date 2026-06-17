@@ -267,20 +267,21 @@ static size_t i2c_build_request_blob(uint8_t *blob, size_t cap)
             uint8_t ch1 = i2c_readings[i].ch1;
             uint8_t ch2 = i2c_readings[i].ch2;
             uint8_t ch3 = i2c_readings[i].ch3;
-            uint8_t tensao = i2c_readings[i].tensao;
+            float tensao = i2c_readings[i].tensao;
 
             /* Sem resposta há >=3 ciclos de broadcast: sensor offline -> zeros
                (porte do "if (rTCounter == 3)" do onRequest Arduino). */
             if (i2c_readings[i].rTCounter >= 3) {
-                ch1 = ch2 = ch3 = tensao = 0;
+                ch1 = ch2 = ch3 = 0;
+                tensao = 0.0f;
             }
 
             snprintf(rec, sizeof(rec),
                      "{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
-                     "\"ch1\":%u,\"ch2\":%u,\"ch3\":%u,\"tensao\":%u}",
+                     "\"ch1\":%u,\"ch2\":%u,\"ch3\":%u,\"tensao\":%0.2f}",
                      i2c_macs[i][0], i2c_macs[i][1], i2c_macs[i][2],
                      i2c_macs[i][3], i2c_macs[i][4], i2c_macs[i][5],
-                     (unsigned)ch1, (unsigned)ch2, (unsigned)ch3, (unsigned)tensao);
+                     (unsigned)ch1, (unsigned)ch2, (unsigned)ch3, (float)tensao);
             off = i2c_emit_record(blob, off, rec);
         }
     }

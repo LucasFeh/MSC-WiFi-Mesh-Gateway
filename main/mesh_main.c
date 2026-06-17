@@ -3,7 +3,7 @@
 const char *MESH_TAG = "mesh_main";
 
 esp_netif_t *netif_sta = NULL;
-const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
+const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x04};
 
 char FW_VERSION[] = { VERSION, '-', 'G', 'a', 't', 'e', 'w', 'a', 'y', '-', 'R', '\0' };
 
@@ -27,6 +27,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  ch1;
     uint8_t  ch2;
     uint8_t  ch3;
+    float volts;
 } read_response_t;
 
 read_response_t queued_response = {0};
@@ -125,12 +126,13 @@ void start_mesh(void)
 
 void app_main(void)
 {
+    // esp_ota_mark_app_valid_cancel_rollback();
     ext_wdt_init();
     ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
-    esp_log_level_set("ROOT", ESP_LOG_INFO);
+    // esp_log_level_set("ROOT", ESP_LOG_INFO);
     esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
-    esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
+    // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
     xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
@@ -163,7 +165,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     read_response_t *resp = (read_response_t *)data.data;
                     char from_str[18];
                     mac_to_str(from.addr, from_str);
-                    ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d", from_str, resp->ch1, resp->ch2, resp->ch3);
+                    ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d tensão: %0.2f", from_str, resp->ch1, resp->ch2, resp->ch3, resp->volts/ 15.6);
                     post_reading_to_flask(from_str, resp->ch1, resp->ch2, resp->ch3);
 
                     /* Atualiza o store consumido pelo onRequest I2C (slave -> master):
@@ -174,7 +176,8 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 i2c_readings[i].ch1       = resp->ch1;
                                 i2c_readings[i].ch2       = resp->ch2;
                                 i2c_readings[i].ch3       = resp->ch3;
-                                i2c_readings[i].tensao    = 0;   /* sem tensão na mesh ainda */
+                                i2c_readings[i].tensao    = resp->volts / 15.6;   /* atualiza tensão */
+
                                 i2c_readings[i].rTCounter = 0;   /* resposta recebida: fresca */
                                 break;
                             }

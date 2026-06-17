@@ -51,7 +51,7 @@ typedef struct {
     uint8_t ch1;
     uint8_t ch2;
     uint8_t ch3;
-    uint8_t tensao;      /* sem campo na mesh ainda: mantido em 0 */
+    float tensao;      /* sem campo na mesh ainda: mantido em 0 */
     uint8_t rTCounter;   /* staleness: 0 = leitura fresca, >=3 = offline */
 } i2c_reading_t;
 
