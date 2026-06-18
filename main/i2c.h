@@ -6,7 +6,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-/* --- Barramento I2C em modo slave (API legada driver/i2c.h) --- */
+/* --- Barramento I2C em modo slave (API legada driver/i2c.h) ---
+   Após a migração para MQTT, o I2C ficou SÓ como canal de reboot do root:
+   o gateway escreve "UPDT_I2C" e o root chama esp_restart(). Leituras e demais
+   comandos agora trafegam por MQTT. */
 #define I2C_SLAVE_PORT       0      /* I2C_NUM_0 */
 #define I2C_SDA_PIN          21
 #define I2C_SCL_PIN          22
@@ -17,63 +20,43 @@
 
 #define MAX_MACS             34
 
-/* Caminho slave -> master (onRequest): o master fixo lê I2C_REQUEST_STRIDE bytes
-   por requestFrom e descarta padding 0xFF/0x8f. Cada registro (1 JSON, "Vazio"
-   ou "FIM") é emitido com exatamente esse stride, de modo que o FIFO TX entregue
-   um registro por leitura sem precisar de callback. */
-#define I2C_REQUEST_STRIDE   72
-
-/* Profundidade do ring buffer TX em REGISTROS. A task de resposta escreve UM
-   registro por vez (no máximo I2C_REQUEST_STRIDE bytes) e só avança para o próximo
-   depois que o master leu o anterior — "uma leitura por escrita". Mantê-lo pequeno
-   (2 registros) impede o acúmulo de cópias na fila, que era o que fazia o master
-   ler "Vazio" várias vezes seguidas. 2 (e não 1) dá folga para o ring buffer aceitar
-   sempre uma escrita de 72 bytes e para o FIFO de hardware não sofrer underrun. */
-#define I2C_TX_DEPTH_RECORDS 2
-#define I2C_TX_BUF_SIZE      (I2C_TX_DEPTH_RECORDS * I2C_REQUEST_STRIDE)
-
-/* Maior blob possível montado de uma vez: um registro por MAC + o sentinela "FIM". */
-#define I2C_REQUEST_BLOB_MAX ((MAX_MACS + 1) * I2C_REQUEST_STRIDE)
-
-/* Lista de MACs compartilhada com a task TX da mesh (mesh_main.c).
-   Mantida aqui para preservar o link com o restante do firmware. */
+/* Lista de MACs compartilhada com a task TX da mesh (mesh_main.c). Agora é
+   populada via MQTT (mesh/cmd/maclist), não mais por I2C. */
 extern uint8_t           i2c_macs[MAX_MACS][6];
 extern volatile int      i2c_mac_count;
 extern SemaphoreHandle_t i2c_macs_mutex;
 
-extern volatile bool pending_read_broadcast;  
-extern volatile bool pending_reboot;  
-/* Leituras de mesh por-MAC (alinhadas por índice com i2c_macs[]), consumidas pelo
-   onRequest I2C. Populadas no RX da mesh (BIN_MSG_READ_RESPONSE); rTCounter conta
-   ciclos de broadcast sem resposta — ao atingir 3 o sensor é reportado zerado.
-   Protegidas pelo mesmo i2c_macs_mutex. */
+extern volatile bool pending_read_broadcast;
+extern volatile bool pending_reboot;
+/* Leituras de mesh por-MAC (alinhadas por índice com i2c_macs[]). Populadas no RX
+   da mesh (BIN_MSG_READ_RESPONSE); rTCounter conta ciclos de broadcast sem
+   resposta — ao atingir 3 o sensor é reportado zerado. Protegidas por i2c_macs_mutex. */
 typedef struct {
     uint8_t ch1;
     uint8_t ch2;
     uint8_t ch3;
-    float tensao;      /* sem campo na mesh ainda: mantido em 0 */
+    float tensao;
     uint8_t rTCounter;   /* staleness: 0 = leitura fresca, >=3 = offline */
 } i2c_reading_t;
 
 extern i2c_reading_t i2c_readings[MAX_MACS];
 
-/* --- Control surface: flags/estado setados pelos comandos I2C (i2c_on_receive).
-   Devem ser lidos/consumidos pela lógica da mesh/aplicação. --- */
-extern volatile bool RequestSendFlag;        /* CLICKED/COMMIT/... pediram envio */
-extern volatile bool clearMacs;              /* CLEAR */
-extern volatile bool flagCommit;             /* COMMIT */
-extern volatile bool flagUnCommit;           /* UNCOMMIT */
-extern volatile bool flagUniscastUpdate;     /* OPDATEUNICAST{AP,STA} */
-extern volatile bool flagUpdate;             /* UPDATE */
-extern volatile bool flagReboot;             /* REBOOT */
-extern volatile bool AP_FLAG;                /* modo AP x STA */
-extern volatile bool timerAdjust;            /* TIME:xx */
-extern volatile int  seconds;                /* valor de TIME:xx */
-extern char          numero[8];              /* nº de série (UPDATE) */
-extern char          updateUnicastMacStr[18];/* MAC alvo do update unicast */
+/* --- Estado herdado (mantido p/ compatibilidade de link). 'seconds' ainda é
+   consumido por read_timer (mesh_main.c); agora é ajustado via mesh/cmd/time. --- */
+extern volatile bool RequestSendFlag;
+extern volatile bool clearMacs;
+extern volatile bool flagCommit;
+extern volatile bool flagUnCommit;
+extern volatile bool flagUniscastUpdate;
+extern volatile bool flagUpdate;
+extern volatile bool flagReboot;
+extern volatile bool AP_FLAG;
+extern volatile bool timerAdjust;
+extern volatile int  seconds;                /* período de leitura (segundos) */
+extern char          numero[8];
+extern char          updateUnicastMacStr[18];
 
 void i2c_slave_init(void);
-void i2c_slave_task(void *arg);          /* RX: master -> slave (comandos) */
-void i2c_slave_request_task(void *arg);  /* TX: slave -> master (onRequest contínuo) */
+void i2c_slave_task(void *arg);          /* RX: só reboot do root (UPDT_I2C) */
 
 #endif /* I2C_SLAVE_H */

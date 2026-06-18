@@ -140,8 +140,7 @@ void app_main(void)
     esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
     esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
     i2c_slave_init();
-    xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
-    xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
+    xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: só comando de reboot (UPDT_I2C) */
     flask_client_init();   /* fila + worker de telemetria (HTTP fora do caminho da mesh) */
     start_mesh();
 }
@@ -173,7 +172,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                     char from_str[18];
                     mac_to_str(from.addr, from_str);
                     // ESP_LOGI(MESH_TAG, "[READ] de %s CH1:%d CH2:%d CH3:%d tensão: %0.2f", from_str, resp->ch1, resp->ch2, resp->ch3, resp->volts/ 15.6);
-                    post_reading_to_flask(from_str, resp->ch1, resp->ch2, resp->ch3);
+                    post_reading_to_flask(from_str, resp->ch1, resp->ch2, resp->ch3, resp->volts / 15.6f);
 
                     /* Atualiza o store consumido pelo onRequest I2C (slave -> master):
                        casa o remetente com a lista i2c_macs[] e grava a leitura fresca,

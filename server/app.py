@@ -1,42 +1,49 @@
 import os
 import json
 import socket
-import simple_websocket
 from datetime import datetime, timezone
 from threading import Lock
 
+import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_socketio import SocketIO, emit as sio_emit
 
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
 
-ROOT_OFFLINE_TIMEOUT_S = 15
+# ── Broker MQTT (mesmo Raspberry do Flask). IP fixo, sem auth. ────────────────
+BROKER_HOST = "192.168.15.191"
+BROKER_PORT = 1883
 
-# O Flask é o SERVIDOR WebSocket; o ROOT (esp_websocket_client) é o CLIENTE e
-# conecta em ws://<host>:5000 -> path "/". Servimos esse WS na MESMA porta 5000
-# do HTTP/Socket.IO, via um dispatcher WSGI (ver _RootWSDispatch, no fim).
-ROOT_WS_PATH = "/"
+# Tópicos — ver docs/superpowers/specs/2026-06-18-i2c-to-mqtt-migration-design.md
+T_READING      = "mesh/reading"
+T_STATUS       = "mesh/status"
+T_OFFLINE      = "mesh/offline"
+T_OTA_PROGRESS = "mesh/ota/progress"
+T_ROOT_STATE   = "mesh/root/state"
+T_CMD_READ      = "mesh/cmd/read"
+T_CMD_OTAMON    = "mesh/cmd/otamon"
+T_CMD_RESET     = "mesh/cmd/reset"
+T_CMD_MARKVALID = "mesh/cmd/markvalid"
+T_CMD_OTA       = "mesh/cmd/ota"
+
+ROOT_OFFLINE_TIMEOUT_S = 15
 
 _lock = Lock()
 _devices = {}
-_ota_pending_url = None
-_ota_pending_name = None
 _firmware_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware_upload.bin")
-_root_ws = None            # simple_websocket.Server do ROOT conectado (ou None)
-_root_ws_lock = Lock()     # serializa envios vindos de threads diferentes
+_root_online = False          # vem do mesh/root/state (retained + LWT)
+_mqtt = None
 
-# ── Monitor OTA ──────────────────────────────────────────────────────────────
-# Telemetria do ROOT durante o OTA. Desligada por padrão (o ROOT só reporta
-# quando ligada por botão, evitando overhead). Tudo em memória, como _devices.
+# ── Monitor OTA (inalterado em relação a hoje) ────────────────────────────────
 _ota_monitor_enabled = False
 _ota_state = {
     "active": False, "op": None, "file": None, "total": 0, "pct": 0,
     "started": None, "finished": None,
-    "targets": [],        # [{"mac":.., "status":"pending"|"ok"|"fail"|"timeout"}]
-    "self_status": None,  # "running"|"rebooting"|"fail" (op self)
+    "targets": [],
+    "self_status": None,
 }
-_ota_history = []         # últimos 10: {"file","op","finished","ok","fail","timeout","self_status"}
+_ota_history = []
 _OTA_HISTORY_MAX = 10
 
 
@@ -51,7 +58,7 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
 
 
-def _is_root_online(last_seen_iso: str) -> bool:
+def _is_fresh(last_seen_iso: str) -> bool:
     try:
         ts = datetime.fromisoformat(last_seen_iso.replace("Z", "+00:00"))
         age = (datetime.now(timezone.utc) - ts).total_seconds()
@@ -65,13 +72,12 @@ def _device_online(info: dict, root_online: bool) -> bool:
         return root_online
     if not root_online:
         return False
-    return _is_root_online(info.get("last_seen", ""))
+    return _is_fresh(info.get("last_seen", ""))
 
 
 def _get_state():
     with _lock:
-        root = next((info for info in _devices.values() if info.get("layer") == 1), None)
-        root_online = _is_root_online(root.get("last_seen", "")) if root else False
+        root_online = _root_online
         return {
             "devices": sorted(
                 [{"mac": mac, **info, "online": _device_online(info, root_online)} for mac, info in _devices.items()],
@@ -93,107 +99,11 @@ def _emit_ota():
     socketio.emit('ota_progress', _ota_payload())
 
 
-def _push_to_root(obj: dict) -> bool:
-    """Empurra um comando JSON ao ROOT pelo WebSocket. False se o ROOT está off
-    ou se o envio falhar. Protegido por lock: vários endpoints/threads podem
-    empurrar comandos (OTA/READ/RESET/MARKVALID/OTAMON) ao mesmo tempo."""
-    ws = _root_ws
-    if ws is None:
-        return False
-    try:
-        with _root_ws_lock:
-            ws.send(json.dumps(obj))
-        return True
-    except Exception:
-        return False
-
-
-def _watch_root():
-    prev_online = {}
-    while True:
-        socketio.sleep(1)
-        with _lock:
-            snapshot = dict(_devices)
-        root = next((info for info in snapshot.values() if info.get("layer") == 1), None)
-        root_online = _is_root_online(root.get("last_seen", "")) if root else False
-        curr_online = {mac: _device_online(info, root_online) for mac, info in snapshot.items()}
-        if curr_online != prev_online:
-            socketio.emit('state_update', _get_state())
-            prev_online = curr_online
-
-
-def _root_ws_handler(environ):
-    """Atende a conexão WebSocket crua do ROOT na MESMA porta 5000 (path "/").
-    O ROOT é o cliente (esp_websocket_client); aqui o Flask é o servidor. A
-    simple_websocket sequestra o socket no handshake; no fim devolvemos [] sem
-    chamar start_response (padrão do modo Werkzeug, igual ao engineio)."""
-    global _root_ws
-    ws = simple_websocket.Server.accept(environ, ping_interval=25)
-    _root_ws = ws
-    print("[WS] ROOT conectado", flush=True)
-    try:
-        # Sincroniza o estado do monitor com o ROOT recém-conectado (cobre o ROOT
-        # ter reiniciado, p.ex. após um self-update, perdendo o flag).
-        with _lock:
-            on = _ota_monitor_enabled
-        with _root_ws_lock:
-            ws.send(json.dumps({"cmd": "OTAMON", "on": on}))
-        while ws.connected:
-            if ws.receive() is None:   # bloqueia até chegar dado (ou a conexão cair)
-                break
-    except simple_websocket.ConnectionClosed:
-        pass
-    except Exception as e:
-        print(f"[WS] erro na conexão do ROOT: {e}", flush=True)
-    finally:
-        if _root_ws is ws:
-            _root_ws = None
-        try:
-            ws.close()
-        except Exception:
-            pass
-        print("[WS] ROOT desconectado", flush=True)
-    return []
-
-
-class _RootWSDispatch:
-    """Middleware WSGI na frente do Flask/Socket.IO: intercepta o upgrade do ROOT
-    em ROOT_WS_PATH e entrega ao handler cru; todo o resto (HTTP /api/*, páginas,
-    /socket.io/ do navegador) segue para o app normalmente, na mesma porta."""
-    def __init__(self, wsgi_app):
-        self.wsgi_app = wsgi_app
-
-    def __call__(self, environ, start_response):
-        if (environ.get("PATH_INFO", "/") == ROOT_WS_PATH
-                and environ.get("HTTP_UPGRADE", "").lower() == "websocket"):
-            return _root_ws_handler(environ)
-        return self.wsgi_app(environ, start_response)
-
-
-@socketio.on('read_request')
-def handle_read_request():
-    if not _push_to_root({"cmd": "READ"}):
-        sio_emit('read_error', {'msg': 'Root não conectado'})
-
-
-@socketio.on('set_ota_monitor')
-def handle_set_ota_monitor(data):
-    """Liga/desliga a telemetria OTA: atualiza o flag, avisa o ROOT (OTAMON) e
-    reemite o novo estado a todos os navegadores."""
-    global _ota_monitor_enabled
-    on = bool((data or {}).get('on'))
-    with _lock:
-        _ota_monitor_enabled = on
-    pushed = _push_to_root({"cmd": "OTAMON", "on": on})
-    socketio.emit('ota_monitor_state', {"monitor_enabled": on, "pushed": pushed})
-
-
-@app.post("/api/status")
-def receive_status():
-    payload = request.get_json(silent=True) or {}
+# ── Aplicadores de telemetria (compartilhados pelos callbacks MQTT) ───────────
+def _apply_status(payload: dict):
     mac = (payload.get("mac") or "").strip().lower()
     if not mac:
-        return jsonify({"ok": False, "error": "missing mac"}), 400
+        return
     with _lock:
         existing = _devices.get(mac, {})
         _devices[mac] = {
@@ -205,91 +115,25 @@ def receive_status():
             "last_seen": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "online":    True,
         }
-    socketio.emit('state_update', _get_state())
-    return jsonify({"ok": True})
 
 
-@app.post("/api/reading")
-def receive_reading():
-    payload = request.get_json(silent=True) or {}
+def _map_reading(payload: dict):
+    """Mapeia o payload MQTT {mac,ch1,ch2,ch3,tensao} para o formato que o
+    navegador já consome (CH1/CH2/CH3), preservando 'tensao'. Função pura:
+    sem ts, sem efeitos — testável isoladamente."""
     mac = (payload.get("mac") or "").strip().lower()
     if not mac:
-        return jsonify({"ok": False, "error": "missing mac"}), 400
-    reading = {
+        return None
+    return {
         "mac": mac,
-        "CH1": payload.get("CH1"),
-        "CH2": payload.get("CH2"),
-        "CH3": payload.get("CH3"),
-        "ts":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "CH1": payload.get("ch1"),
+        "CH2": payload.get("ch2"),
+        "CH3": payload.get("ch3"),
+        "tensao": payload.get("tensao"),
     }
-    socketio.emit('reading_update', reading)
-    return jsonify({"ok": True})
 
 
-@app.post("/api/offline")
-def receive_offline():
-    payload = request.get_json(silent=True) or {}
-    mac = (payload.get("mac") or "").strip().lower()
-    if not mac:
-        return jsonify({"ok": False, "error": "missing mac"}), 400
-    with _lock:
-        if mac in _devices:
-            _devices[mac]["online"] = False
-    socketio.emit('state_update', _get_state())
-    return jsonify({"ok": True})
-
-
-@app.post("/api/ota/upload")
-def upload_firmware():
-    global _ota_pending_url, _ota_pending_name
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "no file attached"}), 400
-    f = request.files["file"]
-    if not f.filename.lower().endswith(".bin"):
-        return jsonify({"ok": False, "error": "o arquivo deve ser .bin"}), 400
-    # Preserva o NOME original (ex.: "Gateway.bin", "Driver-1.bin") — é ele que o
-    # ROOT usa para rotear (self-update vs repasse via mesh).
-    fname = os.path.basename(f.filename)
-    # Alvo unicast opcional: se presente, o ROOT envia o .bin só para esse MAC,
-    # ignorando o roteamento por nome. Ausente -> broadcast por nome (atual).
-    target = (request.form.get("target") or "").strip().lower()
-    f.save(_firmware_path)
-    size = os.path.getsize(_firmware_path)
-    port = request.host.split(":")[1] if ":" in request.host else "5000"
-    ota_url = f"http://{_get_local_ip()}:{port}/firmware/latest.bin"
-    with _lock:
-        _ota_pending_url = ota_url
-        _ota_pending_name = fname
-
-    # Empurra o comando OTA ao ROOT pelo WebSocket (mesmo canal do READ). O ROOT
-    # decide a rota pelo nome (ou unicast, se 'target' vier) e baixa o .bin de ota_url.
-    cmd = {"cmd": "OTA", "file": fname, "url": ota_url}
-    if target:
-        cmd["target"] = target
-    pushed = _push_to_root(cmd)
-
-    return jsonify({"ok": True, "fw_url": ota_url, "size": size,
-                    "file": fname, "target": target or None, "pushed": pushed})
-
-
-@app.get("/firmware/latest.bin")
-def serve_firmware():
-    if not os.path.exists(_firmware_path):
-        return jsonify({"error": "nenhum firmware enviado ainda"}), 404
-    return send_file(_firmware_path, mimetype="application/octet-stream",
-                     as_attachment=True, download_name="firmware.bin")
-
-
-@app.get("/api/state")
-def state():
-    return jsonify(_get_state())
-
-
-@app.post("/api/ota/progress")
-def ota_progress():
-    """Recebe os eventos de telemetria do ROOT (start/progress/ack/done),
-    aplica em _ota_state, fecha no histórico no 'done', e reemite ao navegador."""
-    ev = request.get_json(silent=True) or {}
+def _apply_ota_event(ev: dict):
     etype = ev.get("event")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock:
@@ -324,7 +168,7 @@ def ota_progress():
                 if ev.get("status") == "rebooting":
                     _ota_state["pct"] = 100
             else:
-                for t in _ota_state["targets"]:        # pendentes => timeout
+                for t in _ota_state["targets"]:
                     if t["status"] == "pending":
                         t["status"] = "timeout"
             ok = sum(1 for t in _ota_state["targets"] if t["status"] == "ok")
@@ -336,8 +180,123 @@ def ota_progress():
                 "self_status": _ota_state["self_status"],
             })
             del _ota_history[_OTA_HISTORY_MAX:]
-    _emit_ota()
-    return jsonify({"ok": True})
+
+
+# ── Publicação de comandos ────────────────────────────────────────────────────
+def _publish(topic: str, obj: dict, retain: bool = False) -> bool:
+    if _mqtt is None:
+        return False
+    try:
+        info = _mqtt.publish(topic, json.dumps(obj), qos=1, retain=retain)
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception:
+        return False
+
+
+# ── Callbacks MQTT ────────────────────────────────────────────────────────────
+def _on_connect(client, userdata, flags, reason_code, properties=None):
+    for t in (T_READING, T_STATUS, T_OFFLINE, T_OTA_PROGRESS, T_ROOT_STATE):
+        client.subscribe(t, qos=1)
+    # Reflete o estado atual do monitor (retained) para o ROOT recém-conectado.
+    client.publish(T_CMD_OTAMON, json.dumps({"on": _ota_monitor_enabled}), qos=1, retain=True)
+    print("[MQTT] conectado ao broker", flush=True)
+
+
+def _on_message(client, userdata, msg):
+    global _root_online
+    try:
+        payload = json.loads(msg.payload.decode("utf-8") or "{}")
+    except Exception:
+        payload = {}
+    topic = msg.topic
+
+    if topic == T_STATUS:
+        _apply_status(payload)
+        socketio.emit('state_update', _get_state())
+    elif topic == T_READING:
+        ev = _map_reading(payload)
+        if ev:
+            ev["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            socketio.emit('reading_update', ev)
+    elif topic == T_OFFLINE:
+        mac = (payload.get("mac") or "").strip().lower()
+        if mac:
+            with _lock:
+                if mac in _devices:
+                    _devices[mac]["online"] = False
+            socketio.emit('state_update', _get_state())
+    elif topic == T_OTA_PROGRESS:
+        _apply_ota_event(payload)
+        _emit_ota()
+    elif topic == T_ROOT_STATE:
+        _root_online = bool(payload.get("online"))
+        socketio.emit('state_update', _get_state())
+
+
+def _watch_root():
+    prev_online = {}
+    while True:
+        socketio.sleep(1)
+        with _lock:
+            snapshot = dict(_devices)
+        curr_online = {mac: _device_online(info, _root_online) for mac, info in snapshot.items()}
+        if curr_online != prev_online:
+            socketio.emit('state_update', _get_state())
+            prev_online = curr_online
+
+
+# ── Socket.IO (navegador) ─────────────────────────────────────────────────────
+@socketio.on('read_request')
+def handle_read_request():
+    if not _publish(T_CMD_READ, {}):
+        sio_emit('read_error', {'msg': 'Broker indisponível'})
+
+
+@socketio.on('set_ota_monitor')
+def handle_set_ota_monitor(data):
+    global _ota_monitor_enabled
+    on = bool((data or {}).get('on'))
+    with _lock:
+        _ota_monitor_enabled = on
+    pushed = _publish(T_CMD_OTAMON, {"on": on}, retain=True)
+    socketio.emit('ota_monitor_state', {"monitor_enabled": on, "pushed": pushed})
+
+
+# ── REST (mantidos) ───────────────────────────────────────────────────────────
+@app.post("/api/ota/upload")
+def upload_firmware():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "no file attached"}), 400
+    f = request.files["file"]
+    if not f.filename.lower().endswith(".bin"):
+        return jsonify({"ok": False, "error": "o arquivo deve ser .bin"}), 400
+    fname = os.path.basename(f.filename)
+    target = (request.form.get("target") or "").strip().lower()
+    f.save(_firmware_path)
+    size = os.path.getsize(_firmware_path)
+    port = request.host.split(":")[1] if ":" in request.host else "5000"
+    ota_url = f"http://{_get_local_ip()}:{port}/firmware/latest.bin"
+
+    cmd = {"file": fname, "url": ota_url}
+    if target:
+        cmd["target"] = target
+    pushed = _publish(T_CMD_OTA, cmd)
+
+    return jsonify({"ok": True, "fw_url": ota_url, "size": size,
+                    "file": fname, "target": target or None, "pushed": pushed})
+
+
+@app.get("/firmware/latest.bin")
+def serve_firmware():
+    if not os.path.exists(_firmware_path):
+        return jsonify({"error": "nenhum firmware enviado ainda"}), 404
+    return send_file(_firmware_path, mimetype="application/octet-stream",
+                     as_attachment=True, download_name="firmware.bin")
+
+
+@app.get("/api/state")
+def state():
+    return jsonify(_get_state())
 
 
 @app.get("/api/ota/state")
@@ -351,20 +310,17 @@ def reset_node():
     target = (payload.get("target") or "").strip().lower()
     if not target:
         return jsonify({"ok": False, "error": "missing target"}), 400
-    pushed = _push_to_root({"cmd": "RESET", "target": target})
+    pushed = _publish(T_CMD_RESET, {"target": target})
     return jsonify({"ok": True, "target": target, "pushed": pushed})
 
 
 @app.post("/api/markvalid")
 def mark_valid_node():
-    """Pede ao ROOT para chamar esp_ota_mark_app_valid_cancel_rollback() no alvo.
-    Se o alvo for o próprio ROOT, ele executa localmente; senão repassa por unicast
-    na mesh (BIN_MSG_MARK_VALID). Fire-and-forget, como o RESET."""
     payload = request.get_json(silent=True) or {}
     target = (payload.get("target") or "").strip().lower()
     if not target:
         return jsonify({"ok": False, "error": "missing target"}), 400
-    pushed = _push_to_root({"cmd": "MARKVALID", "target": target})
+    pushed = _publish(T_CMD_MARKVALID, {"target": target})
     return jsonify({"ok": True, "target": target, "pushed": pushed})
 
 
@@ -378,10 +334,13 @@ def topology():
     return render_template("mesh_tree.html")
 
 
-# Coloca o servidor WS cru na frente do Flask/Socket.IO, na mesma porta 5000.
-# (Tem de ser depois de SocketIO(app), que já embrulhou app.wsgi_app.)
-app.wsgi_app = _RootWSDispatch(app.wsgi_app)
-
 if __name__ == "__main__":
+    _mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    _mqtt.on_connect = _on_connect
+    _mqtt.on_message = _on_message
+    _mqtt.loop_start()
+    # connect_async + loop_start: não bloqueia nem quebra se o broker ainda não
+    # subiu; o paho (re)conecta sozinho quando o Mosquitto ficar disponível.
+    _mqtt.connect_async(BROKER_HOST, BROKER_PORT, keepalive=30)
     socketio.start_background_task(_watch_root)
     socketio.run(app, host="0.0.0.0", port=5000, debug=False)
