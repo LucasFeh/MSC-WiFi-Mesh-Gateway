@@ -9,12 +9,12 @@
 #include "esp_log.h"
 
 
-#define FLASK_SERVER_URL    "http://192.168.15.191:5000/api/log"
-#define FLASK_READING_URL   "http://192.168.15.191:5000/api/reading"
-#define FLASK_STATUS_URL    "http://192.168.15.191:5000/api/status"
-#define FLASK_OTA_PROGRESS_URL "http://192.168.15.191:5000/api/ota/progress"
-#define FLASK_WS_URL        "ws://192.168.15.191:5000"
-
+#define FLASK_SERVER_URL    "http://192.168.10.190:5000/api/log"
+#define FLASK_READING_URL   "http://192.168.10.190:5000/api/reading"
+#define FLASK_STATUS_URL    "http://192.168.10.190:5000/api/status"
+#define FLASK_OTA_PROGRESS_URL "http://192.168.10.190:5000/api/ota/progress"
+#define FLASK_OFFLINE_URL  "http://192.168.10.190:5000/api/offline"
+#define FLASK_WS_URL        "ws://192.168.10.190:5000"
 
 extern const char *MESH_TAG;
 
@@ -26,5 +26,7 @@ extern void post_status_to_flask(const char *mac_str, const char *parent_str, ui
    is_got_ip && flask_connected; o liga/desliga do monitor fica no OTA (ota.c). */
 extern void post_ota_event(const char *json_body);
 extern void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+/* Cria a fila + worker de telemetria. Chamar uma vez antes de start_mesh(). */
+extern void flask_client_init(void);
 
 #endif /* FLASK_REQUEST_H */

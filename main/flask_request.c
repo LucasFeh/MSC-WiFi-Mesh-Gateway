@@ -1,4 +1,5 @@
 #include "mesh_main.h"
+#include "freertos/queue.h"
 
 static esp_websocket_client_handle_t ws_client = NULL;
 
@@ -6,6 +7,118 @@ static esp_websocket_client_handle_t ws_client = NULL;
 static volatile bool flask_connected = false;
 
 static void root_ws_task(void *arg);
+
+/* ---------------------------------------------------------------------------
+ * Fila de telemetria -> Flask.
+ *
+ * Os POSTs HTTP são BLOQUEANTES (timeout 3 s). Antes eram feitos direto nas
+ * tasks de RX/TX da mesh (e no event handler): se o lado HTTP do Flask ficasse
+ * lento/inacessível — mesmo com o WebSocket ainda de pé — a task de RX da mesh
+ * travava até 3 s por leitura, a fila interna da mesh estourava e a rede caía,
+ * sem recuperar. Agora os produtores apenas ENFILEIRAM (não-bloqueante, descarta
+ * se cheia) e uma única task drena a fila fazendo o HTTP fora do caminho crítico.
+ * ------------------------------------------------------------------------- */
+typedef enum {
+    FLASK_JOB_READING = 0,
+    FLASK_JOB_STATUS,
+    FLASK_JOB_OFFLINE,
+    FLASK_JOB_OTA,
+} flask_job_type_t;
+
+typedef struct {
+    uint8_t type;
+    union {
+        struct { char mac[18]; uint8_t ch1, ch2, ch3; } reading;
+        struct { char mac[18]; char parent[18]; uint8_t layer; int8_t rssi; char version[16]; } status;
+        struct { char mac[18]; } offline;
+        struct { char *body; } ota;   /* heap (strdup); a worker libera após enviar */
+    } u;
+} flask_job_t;
+
+#define FLASK_QUEUE_DEPTH  16
+
+static QueueHandle_t flask_queue = NULL;
+
+/* Executa o POST bloqueante. Roda só na worker, fora do caminho crítico. */
+static void flask_http_post(const char *url, const char *body, int len)
+{
+    esp_http_client_config_t cfg = {
+        .url        = url,
+        .method     = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, len);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+static void flask_worker_task(void *arg)
+{
+    flask_job_t job;
+    char        body[176];
+
+    for (;;) {
+        if (xQueueReceive(flask_queue, &job, portMAX_DELAY) != pdTRUE) continue;
+
+        /* Reconfere conectividade no envio: pode ter caído enquanto o job
+           esperava na fila. Jobs OTA têm corpo no heap; libera mesmo se pular. */
+        bool online = is_got_ip && flask_connected;
+        int  n;
+
+        switch (job.type) {
+        case FLASK_JOB_READING:
+            if (!online) break;
+            n = snprintf(body, sizeof(body),
+                         "{\"mac\":\"%s\",\"CH1\":%d,\"CH2\":%d,\"CH3\":%d}",
+                         job.u.reading.mac, job.u.reading.ch1, job.u.reading.ch2, job.u.reading.ch3);
+            flask_http_post(FLASK_READING_URL, body, n);
+            break;
+        case FLASK_JOB_STATUS:
+            if (!online) break;
+            n = snprintf(body, sizeof(body),
+                         "{\"mac\":\"%s\",\"parent\":\"%s\",\"layer\":%d,\"rssi\":%d,\"version\":\"%s\"}",
+                         job.u.status.mac, job.u.status.parent, job.u.status.layer,
+                         job.u.status.rssi, job.u.status.version);
+            flask_http_post(FLASK_STATUS_URL, body, n);
+            break;
+        case FLASK_JOB_OFFLINE:
+            if (!online) break;
+            n = snprintf(body, sizeof(body), "{\"mac\":\"%s\"}", job.u.offline.mac);
+            flask_http_post(FLASK_OFFLINE_URL, body, n);
+            break;
+        case FLASK_JOB_OTA:
+            if (online && job.u.ota.body)
+                flask_http_post(FLASK_OTA_PROGRESS_URL, job.u.ota.body, strlen(job.u.ota.body));
+            free(job.u.ota.body);   /* sempre libera o strdup, online ou não */
+            break;
+        }
+    }
+}
+
+/* Enfileira um job; NÃO bloqueia. Descarta se a fila estiver cheia/ausente. */
+static bool flask_enqueue(const flask_job_t *job)
+{
+    if (!flask_queue) return false;
+    if (xQueueSend(flask_queue, job, 0) != pdTRUE) {
+        ESP_LOGW(MESH_TAG, "[FLASK] fila cheia, telemetria descartada");
+        return false;
+    }
+    return true;
+}
+
+/* Cria a fila e a worker de telemetria. Chamar antes de start_mesh(). */
+void flask_client_init(void)
+{
+    flask_queue = xQueueCreate(FLASK_QUEUE_DEPTH, sizeof(flask_job_t));
+    if (!flask_queue) {
+        ESP_LOGE(MESH_TAG, "[FLASK] falha ao criar fila de telemetria");
+        return;
+    }
+    xTaskCreate(flask_worker_task, "FLASKTX", 4096, NULL, 4, NULL);
+}
 
 void ip_event_handler(void *arg, esp_event_base_t event_base,
                       int32_t event_id, void *event_data)
@@ -146,85 +259,50 @@ void post_reading_to_flask(const char *mac_str, uint8_t ch1, uint8_t ch2, uint8_
 {
     if (!is_got_ip || !flask_connected) return;
 
-    char body[128];
-    int n = snprintf(body, sizeof(body),
-                     "{\"mac\":\"%s\",\"CH1\":%d,\"CH2\":%d,\"CH3\":%d}",
-                     mac_str, ch1, ch2, ch3);
-
-    esp_http_client_config_t cfg = {
-        .url        = FLASK_READING_URL,
-        .method     = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return;
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, n);
-    esp_http_client_perform(client);
-    esp_http_client_cleanup(client);
+    flask_job_t job = { .type = FLASK_JOB_READING };
+    snprintf(job.u.reading.mac, sizeof(job.u.reading.mac), "%s", mac_str);
+    job.u.reading.ch1 = ch1;
+    job.u.reading.ch2 = ch2;
+    job.u.reading.ch3 = ch3;
+    flask_enqueue(&job);
 }
 
 void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t layer, int8_t rssi, const char *version)
 {
     if (!is_got_ip || !flask_connected) return;
 
-    char body[160];
-    int n = snprintf(body, sizeof(body),
-                     "{\"mac\":\"%s\",\"parent\":\"%s\",\"layer\":%d,\"rssi\":%d,\"version\":\"%s\"}",
-                     mac_str, parent_str, layer, rssi, version);
-
-    esp_http_client_config_t cfg = {
-        .url        = FLASK_STATUS_URL,
-        .method     = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return;
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, n);
-    esp_http_client_perform(client);
-    esp_http_client_cleanup(client);
+    flask_job_t job = { .type = FLASK_JOB_STATUS };
+    snprintf(job.u.status.mac, sizeof(job.u.status.mac), "%s", mac_str);
+    snprintf(job.u.status.parent, sizeof(job.u.status.parent), "%s", parent_str);
+    snprintf(job.u.status.version, sizeof(job.u.status.version), "%s", version);
+    job.u.status.layer = layer;
+    job.u.status.rssi  = rssi;
+    flask_enqueue(&job);
 }
 
 /* Telemetria OTA: posta um JSON já montado em ota.c. O gate liga/desliga do
-   monitor é decidido lá; aqui só checamos conectividade, como nos demais posts. */
+   monitor é decidido lá; aqui só checamos conectividade, como nos demais posts.
+   O corpo é copiado para o heap (strdup) porque pode chegar a ~512 bytes; a
+   worker libera após enviar. */
 void post_ota_event(const char *json_body)
 {
     if (!is_got_ip || !flask_connected) return;
 
-    esp_http_client_config_t cfg = {
-        .url        = FLASK_OTA_PROGRESS_URL,
-        .method     = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return;
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_body, strlen(json_body));
-    esp_http_client_perform(client);
-    esp_http_client_cleanup(client);
+    char *copy = strdup(json_body);
+    if (!copy) return;
+
+    flask_job_t job = { .type = FLASK_JOB_OTA };
+    job.u.ota.body = copy;
+    if (!flask_enqueue(&job)) free(copy);   /* fila cheia: evita vazamento */
 }
 
 void notify_offline(const uint8_t mac[6])
 {
     if (!is_got_ip || !flask_connected) return;
 
-    char mac_str[18];
-    mac_to_str(mac, mac_str);
-    char body[64];
-    int n = snprintf(body, sizeof(body), "{\"mac\":\"%s\"}", mac_str);
-
-    esp_http_client_config_t cfg = {
-        .url        = "http://192.168.15.213:5000/api/offline",
-        .method     = HTTP_METHOD_POST,
-        .timeout_ms = 3000,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return;
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, body, n);
-    esp_http_client_perform(client);
-    esp_http_client_cleanup(client);
+    flask_job_t job = { .type = FLASK_JOB_OFFLINE };
+    mac_to_str(mac, job.u.offline.mac);
+    flask_enqueue(&job);
 }
 
 void led_search_task(void *arg)

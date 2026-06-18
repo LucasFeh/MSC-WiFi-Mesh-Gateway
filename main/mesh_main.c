@@ -7,6 +7,11 @@ const uint8_t MESH_ID[6] = { 0x66, 0x66, 0x66, 0x66, 0x66, 0x04};
 
 char FW_VERSION[] = { VERSION, '-', 'G', 'a', 't', 'e', 'w', 'a', 'y', '-', 'R', '\0' };
 
+/* Tempo (ms) que o firmware precisa rodar com IP estável antes de confirmar a
+   imagem OTA (cancelar o rollback). Curto demais confirma imagem ruim; longo
+   demais aumenta a janela de risco caso haja reboot antes da confirmação. */
+#define OTA_VALIDATE_STABLE_MS  30000
+
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
@@ -126,7 +131,17 @@ void start_mesh(void)
 
 void app_main(void)
 {
-    // esp_ota_mark_app_valid_cancel_rollback();
+    /* Diagnóstico de rollback: estado da partição em execução no boot.
+       IMPORTANTE: NÃO confirmar a imagem aqui. A confirmação
+       (esp_ota_mark_app_valid_cancel_rollback) é feita na task TX só DEPOIS da
+       autovalidação (IP estável). Confirmar no início do app_main marcaria como
+       válida até uma imagem quebrada, anulando o rollback. */
+    esp_log_level_set("OTA", ESP_LOG_INFO);
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    esp_ota_get_state_partition(run, &st);
+    ESP_LOGW("OTA", "part=%s state=%d", run->label, st);  // 0=NEW 1=PENDING_VERIFY 2=VALID 3=INVALID 4=ABORTED
+
     ext_wdt_init();
     ext_wdt_start();
     esp_log_level_set("*", ESP_LOG_NONE);
@@ -136,6 +151,7 @@ void app_main(void)
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
     xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
+    flask_client_init();   /* fila + worker de telemetria (HTTP fora do caminho da mesh) */
     start_mesh();
 }
 
@@ -209,11 +225,41 @@ void esp_mesh_p2p_rx_main(void *arg)
 void esp_mesh_p2p_tx_main(void *arg)
 {
     static TickType_t last_status_tick = 0;
+    static bool       ota_validation_done = false;  /* autovalidação OTA: roda só uma vez */
+    static TickType_t got_ip_since        = 0;      /* tick em que o IP ficou estável     */
 
     while (1) {
         /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
         uint8_t local_macs[MAX_MACS][6];
         int local_count = 0;
+
+        /* --- Autovalidação OTA (rollback) ---
+           Com CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, a imagem recém-gravada sobe
+           como PENDING_VERIFY e PRECISA ser confirmada, senão o bootloader reverte
+           no próximo reboot. Só confirmamos depois de provar que o firmware presta:
+           pegou IP do roteador (is_got_ip) e ficou estável por OTA_VALIDATE_STABLE_MS.
+           Se travar/crashar antes disso, o watchdog reseta e o bootloader faz o
+           rollback para a versão anterior — exatamente o comportamento desejado. */
+        if (!ota_validation_done) {
+            const esp_partition_t *run = esp_ota_get_running_partition();
+            esp_ota_img_states_t ota_st;
+            if (esp_ota_get_state_partition(run, &ota_st) != ESP_OK ||
+                ota_st != ESP_OTA_IMG_PENDING_VERIFY) {
+                ota_validation_done = true;          /* já VALID (ou rollback off): nada a fazer */
+            } else if (!is_got_ip) {
+                got_ip_since = 0;                    /* sem IP: (re)inicia a contagem */
+            } else {
+                if (got_ip_since == 0) got_ip_since = xTaskGetTickCount();
+                if (xTaskGetTickCount() - got_ip_since >= pdMS_TO_TICKS(OTA_VALIDATE_STABLE_MS)) {
+                    esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+                    char *r_suffix = strstr(FW_VERSION, "-R");
+                    if (r_suffix) *r_suffix = '\0'; /* tira o "-R": versão agora é fixa/confirmada */
+                    ESP_LOGW("OTA", "[AUTO-VALID] imagem confirmada -> %s, ver=%s",
+                             esp_err_to_name(e), FW_VERSION);
+                    ota_validation_done = true;
+                }
+            }
+        }
 
         if (pending_read_broadcast) {
             pending_read_broadcast = false;
@@ -225,17 +271,16 @@ void esp_mesh_p2p_tx_main(void *arg)
                 .tos   = MESH_TOS_P2P,
             };
 
-            if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                local_count = i2c_mac_count;
-                memcpy(local_macs, i2c_macs, local_count * 6);
-                /* Cada ciclo de broadcast conta como uma "tentativa". O contador é
-                   zerado quando a resposta chega (ver RX); ao atingir 3 o onRequest
-                   passa a reportar leituras zeradas (sensor offline). */
-                for (int i = 0; i < local_count; i++) {
-                    if (i2c_readings[i].rTCounter < 3) i2c_readings[i].rTCounter++;
-                }
-                xSemaphoreGive(i2c_macs_mutex);
+         
+            local_count = i2c_mac_count;
+            memcpy(local_macs, i2c_macs, local_count * 6);
+            /* Cada ciclo de broadcast conta como uma "tentativa". O contador é
+                zerado quando a resposta chega (ver RX); ao atingir 3 o onRequest
+                passa a reportar leituras zeradas (sensor offline). */
+            for (int i = 0; i < local_count; i++) {
+                if (i2c_readings[i].rTCounter < 3) i2c_readings[i].rTCounter++;
             }
+  
 
             for (int i = 0; i < local_count; i++) {
                 mesh_addr_t dest;
@@ -321,6 +366,11 @@ void esp_mesh_p2p_tx_main(void *arg)
             }
         }
 
+        // /* Health-gate do watchdog externo: este loop roda incondicionalmente a
+        //    cada 50 ms; se travar (deadlock/starvation), o feed para e a placa
+        //    reseta sozinha. Ver ext_watchdog.c. */
+        // ext_wdt_feed();
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     vTaskDelete(NULL);
@@ -403,6 +453,10 @@ void read_timer(void *arg)
 {
     while (1) {
         pending_read_broadcast = true;
-        vTaskDelay(pdMS_TO_TICKS(1000)*seconds);
+        /* Clamp: 'seconds' começa em 0 (só é ajustado pelo comando I2C "TIME:").
+           Sem isto, vTaskDelay(0) NÃO bloqueia e esta task vira um busy-loop a
+           100% de CPU, starvando as demais até chegar o primeiro TIME:. */
+        int period = seconds > 0 ? seconds : 1;
+        vTaskDelay(pdMS_TO_TICKS(1000) * period);
     }
 }
