@@ -216,8 +216,6 @@ void esp_mesh_p2p_rx_main(void *arg)
 void esp_mesh_p2p_tx_main(void *arg)
 {
     static TickType_t last_status_tick = 0;
-    static bool       ota_validation_done = false;  /* autovalidação OTA: roda só uma vez */
-    static TickType_t got_ip_since        = 0;      /* tick em que o IP ficou estável     */
 
     while (1) {
         /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
