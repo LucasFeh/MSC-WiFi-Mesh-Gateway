@@ -135,10 +135,10 @@ void app_main(void)
 
     ext_wdt_init();
     ext_wdt_start();
-    esp_log_level_set("*", ESP_LOG_NONE);
-    // esp_log_level_set("ROOT", ESP_LOG_INFO);
-    // esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
-    // esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
+    // esp_log_level_set("*", ESP_LOG_NONE);
+    esp_log_level_set("ROOT", ESP_LOG_INFO);
+    esp_log_level_set(MESH_TAG, ESP_LOG_INFO);
+    esp_log_level_set("I2C_SLAVE", ESP_LOG_INFO);
     i2c_slave_init();
     xTaskCreate(i2c_slave_task, "I2CSLV", 4096, NULL, 5, NULL);          /* RX: comandos do master */
     xTaskCreate(i2c_slave_request_task, "I2CREQ", 4096, NULL, 5, NULL);  /* TX: resposta contínua ao master */
