@@ -184,7 +184,8 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 i2c_readings[i].ch3       = resp->ch3;
                                 i2c_readings[i].tensao    = resp->volts / 15.6;   /* atualiza tensão */
 
-                                i2c_readings[i].rTCounter = 0;   /* resposta recebida: fresca */
+                                i2c_readings[i].rTCounter = 0;       /* resposta recebida: fresca */
+                                i2c_readings[i].online    = true;    /* já respondeu ao menos 1x */
                                 break;
                             }
                         }
