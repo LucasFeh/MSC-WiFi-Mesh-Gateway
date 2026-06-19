@@ -37,6 +37,7 @@ typedef struct {
     uint8_t ch3;
     float tensao;
     uint8_t rTCounter;   /* staleness: 0 = leitura fresca, >=3 = offline */
+    bool    online;      /* true após a 1ª resposta; false até responder ou após cair */
 } i2c_reading_t;
 
 extern i2c_reading_t i2c_readings[MAX_MACS];
