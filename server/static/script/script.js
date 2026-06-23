@@ -115,6 +115,7 @@ function updateReading(r) {
         <td>${r.CH1 ?? "—"}</td>
         <td>${r.CH2 ?? "—"}</td>
         <td>${r.CH3 ?? "—"}</td>
+        <td>${r.tensao ?? "—"}</td>
         <td class="mono">${ts}</td>
     </tr>`;
     if (existingRow) {

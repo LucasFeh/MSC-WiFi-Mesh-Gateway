@@ -9,7 +9,7 @@
 #include "esp_log.h"
 
 /* Broker MQTT no Raspberry (mesma máquina do Flask). IP fixo, sem auth. */
-#define MQTT_BROKER_URI        "mqtt://192.168.15.191:1883"
+#define MQTT_BROKER_URI        "mqtt://192.168.10.190:1883"
 
 /* Tópicos — ver docs/superpowers/specs/2026-06-18-i2c-to-mqtt-migration-design.md */
 #define TOPIC_READING          "mesh/reading"

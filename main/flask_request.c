@@ -166,6 +166,8 @@ static void mqtt_event_handler(void *args, esp_event_base_t base, int32_t event_
         s_mqtt_connected = true;
         esp_mqtt_client_publish(s_mqtt, TOPIC_ROOT_STATE, "{\"online\":true}", 0, 1, 1);  /* retained */
         esp_mqtt_client_subscribe(s_mqtt, TOPIC_CMD_WILDCARD, 1);
+        /* (Re)conexão ao broker: dispara um ciclo de status logo de cara (repovoa a UI). */
+        pending_status_broadcast = true;
         ESP_LOGI(MESH_TAG, "[MQTT] conectado, envio ativado");
         break;
     case MQTT_EVENT_DISCONNECTED:

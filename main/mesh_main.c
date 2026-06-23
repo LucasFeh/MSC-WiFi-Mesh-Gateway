@@ -10,6 +10,7 @@ char FW_VERSION[] = { VERSION, '-', 'G', 'a', 't', 'e', 'w', 'a', 'y', '-', 'R',
 bool is_mesh_connected        = false;
 bool is_got_ip                = false;
 volatile bool pending_read_broadcast = false;
+volatile bool pending_status_broadcast = false;  /* root: broadcast de STATUS_REQUEST (polled 30 s) */
 volatile bool pending_reboot = false;
 volatile bool pending_reboot_unicast = false;  /* reboot unicast para MAC específico */
 uint8_t reboot_unicast_mac[6] = {0};
@@ -46,6 +47,7 @@ esp_err_t esp_mesh_comm_p2p_start(void)
         xTaskCreate(esp_mesh_p2p_tx_main, "MPTX", 8192, NULL, 5, NULL);
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 8192, NULL, 5, NULL);
         xTaskCreate(read_timer, "RHT", 8192, NULL, 5, NULL);
+        xTaskCreate(status_timer, "STMR", 8192, NULL, 5, NULL);
     }
     return ESP_OK;
 }
@@ -189,6 +191,7 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 break;
                             }
                         }
+                    pending_status_broadcast = true;
                     break;
                 case BIN_MSG_STATUS:
                     
@@ -215,8 +218,6 @@ void esp_mesh_p2p_rx_main(void *arg)
 
 void esp_mesh_p2p_tx_main(void *arg)
 {
-    static TickType_t last_status_tick = 0;
-
     while (1) {
         /* Copia a lista com mutex para não bloquear a task I2C durante os envios */
         uint8_t local_macs[MAX_MACS][6];
@@ -249,6 +250,45 @@ void esp_mesh_p2p_tx_main(void *arg)
                 memcpy(dest.addr, local_macs[i], 6);
                 esp_mesh_send(&dest, &tx, MESH_DATA_P2P, NULL, 0);
                 ESP_LOGI(MESH_TAG, "[TX] READ_REQUEST -> "MACSTR, MAC2STR(dest.addr));
+            }
+        }
+
+        /* Status polled: broadcast de STATUS_REQUEST p/ todos os nós + status do
+           próprio root (layer 1). Substitui o publish por evento (sem storm). */
+        if (pending_status_broadcast) {
+            pending_status_broadcast = false;
+            uint16_t sreq = BIN_MSG_STATUS_REQUEST;
+            mesh_data_t txs = {
+                .data  = (uint8_t *)&sreq,
+                .size  = sizeof(uint16_t),
+                .proto = MESH_PROTO_BIN,
+                .tos   = MESH_TOS_P2P,
+            };
+            uint8_t smacs[MAX_MACS][6];
+            int scount = 0;
+            if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                scount = i2c_mac_count;
+                memcpy(smacs, i2c_macs, scount * 6);
+                xSemaphoreGive(i2c_macs_mutex);
+            }
+            for (int i = 0; i < scount; i++) {
+                mesh_addr_t dest;
+                memcpy(dest.addr, smacs[i], 6);
+                esp_mesh_send(&dest, &txs, MESH_DATA_P2P, NULL, 0);
+            }
+            ESP_LOGI(MESH_TAG, "[TX] STATUS_REQUEST -> %d no(s)", scount);
+
+            /* status do próprio root (layer 1): mantém a linha do root viva na UI */
+            if (is_got_ip) {
+                wifi_ap_record_t ap_info;
+                int8_t rssi = 0;
+                if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+                    rssi = ap_info.rssi;
+                uint8_t mac[6];
+                char mac_str[18];
+                esp_wifi_get_mac(WIFI_IF_STA, mac);
+                mac_to_str(mac, mac_str);
+                post_status_to_flask(mac_str, "wifi_router", 1, rssi, FW_VERSION);
             }
         }
 
@@ -311,23 +351,6 @@ void esp_mesh_p2p_tx_main(void *arg)
             }
         }
 
-        TickType_t now = xTaskGetTickCount();
-        if (now - last_status_tick >= pdMS_TO_TICKS(5000)) {
-            last_status_tick = now;
-            wifi_ap_record_t ap_info;
-            int8_t rssi = 0;
-            if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
-                rssi = ap_info.rssi;
-
-            if (is_got_ip) {
-                uint8_t mac[6];
-                char mac_str[18];
-                esp_wifi_get_mac(WIFI_IF_STA, mac);
-                mac_to_str(mac, mac_str);
-                post_status_to_flask(mac_str, "wifi_router", 1, rssi, FW_VERSION);
-            }
-        }
-
         // /* Health-gate do watchdog externo: este loop roda incondicionalmente a
         //    cada 50 ms; se travar (deadlock/starvation), o feed para e a placa
         //    reseta sozinha. Ver ext_watchdog.c. */
@@ -365,7 +388,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         mesh_event_child_disconnected_t *child = (mesh_event_child_disconnected_t *)event_data;
         ESP_LOGI(MESH_TAG, "[MESH] child disconnected: "MACSTR"", MAC2STR(child->mac));
         if (is_got_ip)
-            notify_offline(child->mac);
+            notify_offline(child->mac);   /* offline imediato p/ filho direto (mesh/offline) */
         break;
     }
     case MESH_EVENT_PARENT_CONNECTED: {
@@ -382,6 +405,8 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         esp_netif_dhcpc_stop(netif_sta);
         esp_netif_dhcpc_start(netif_sta);
         esp_mesh_comm_p2p_start();
+        /* Subida/reconexão da mesh: dispara um ciclo de status assim que houver IP. */
+        pending_status_broadcast = true;
         break;
     }
     case MESH_EVENT_PARENT_DISCONNECTED: {
@@ -411,14 +436,31 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 
+/* Período de leitura padrão (s) quando o gateway ainda não configurou via
+   mesh/cmd/time ('seconds' == 0). Antes era 1 s (clamp anti busy-loop), que
+   inundava a mesh; default agora é 1 minuto. */
+#define READ_PERIOD_DEFAULT_S 60
+
 void read_timer(void *arg)
 {
     while (1) {
         pending_read_broadcast = true;
-        /* Clamp: 'seconds' começa em 0 (só é ajustado pelo comando I2C "TIME:").
-           Sem isto, vTaskDelay(0) NÃO bloqueia e esta task vira um busy-loop a
-           100% de CPU, starvando as demais até chegar o primeiro TIME:. */
-        int period = seconds > 0 ? seconds : 1;
+        /* Usa 'seconds' se configurado via mesh/cmd/time; senão o default de
+           READ_PERIOD_DEFAULT_S. O default > 0 também evita o busy-loop de
+           vTaskDelay(0) enquanto nenhum TIME: chegou. */
+        int period = seconds > 0 ? seconds : READ_PERIOD_DEFAULT_S;
         vTaskDelay(pdMS_TO_TICKS(1000) * period);
+    }
+}
+
+/* Período do poll de status (s). Status é leve (rssi/layer/versão/parent), não
+   toca no I2C — 30 s não pesa no barramento. Liveness vira frescor no Flask. */
+#define STATUS_PERIOD_S 30
+
+void status_timer(void *arg)
+{
+    while (1) {
+        pending_status_broadcast = true;
+        vTaskDelay(pdMS_TO_TICKS(1000) * STATUS_PERIOD_S);
     }
 }

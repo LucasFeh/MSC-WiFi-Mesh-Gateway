@@ -12,7 +12,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
 
 # ── Broker MQTT (mesmo Raspberry do Flask). IP fixo, sem auth. ────────────────
-BROKER_HOST = "192.168.15.191"
+BROKER_HOST = "localhost"
 BROKER_PORT = 1883
 
 # Tópicos — ver docs/superpowers/specs/2026-06-18-i2c-to-mqtt-migration-design.md
@@ -27,7 +27,7 @@ T_CMD_RESET     = "mesh/cmd/reset"
 T_CMD_MARKVALID = "mesh/cmd/markvalid"
 T_CMD_OTA       = "mesh/cmd/ota"
 
-ROOT_OFFLINE_TIMEOUT_S = 15
+DEVICE_OFFLINE_TIMEOUT_S = 90   # 90 s (3 polls de status de 30 s) sem mensagem -> offline
 
 _lock = Lock()
 _devices = {}
@@ -59,20 +59,26 @@ def _get_local_ip() -> str:
 
 
 def _is_fresh(last_seen_iso: str) -> bool:
+    # Liveness por timeout: o root pede status a cada 30 s e o driver responde
+    # (mesh/status). Se nada chegar em DEVICE_OFFLINE_TIMEOUT_S (90 s = 3 polls)
+    # o device é tratado como offline. Margem folgada evita falso-offline por um
+    # poll atrasado/perdido (não derruba a malha inteira de uma vez).
     try:
         ts = datetime.fromisoformat(last_seen_iso.replace("Z", "+00:00"))
-        age = (datetime.now(timezone.utc) - ts).total_seconds()
-        return age <= ROOT_OFFLINE_TIMEOUT_S
+        return (datetime.now(timezone.utc) - ts).total_seconds() <= DEVICE_OFFLINE_TIMEOUT_S
     except Exception:
         return False
 
 
 def _device_online(info: dict, root_online: bool) -> bool:
+    # Online = visto (status/leitura) dentro do timeout E sem sinal de offline.
+    # online_flag: True via _apply_status; False via mesh/offline (sinal imediato
+    # no CHILD_DISCONNECTED). Offline também vem do timeout de last_seen.
     if info.get("layer") == 1:
         return root_online
     if not root_online:
         return False
-    return _is_fresh(info.get("last_seen", ""))
+    return bool(info.get("online", False)) and _is_fresh(info.get("last_seen", ""))
 
 
 def _get_state():
