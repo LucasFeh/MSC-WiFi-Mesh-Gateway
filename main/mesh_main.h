@@ -35,7 +35,7 @@ extern esp_netif_t *netif_sta;
 
 extern const uint8_t MESH_ID[6];
 
-#define VERSION '3'
+#define VERSION '4'
 extern char FW_VERSION[];
 
 /* Grupo mesh para broadcast de leitura */

@@ -455,7 +455,7 @@ void read_timer(void *arg)
 
 /* Período do poll de status (s). Status é leve (rssi/layer/versão/parent), não
    toca no I2C — 30 s não pesa no barramento. Liveness vira frescor no Flask. */
-#define STATUS_PERIOD_S 30
+#define STATUS_PERIOD_S 10
 
 void status_timer(void *arg)
 {

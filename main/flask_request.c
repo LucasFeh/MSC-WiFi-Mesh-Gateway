@@ -109,10 +109,10 @@ static void on_command(const char *topic, int tlen, const char *data, int dlen)
     int tn = tlen < (int)sizeof(t) - 1 ? tlen : (int)sizeof(t) - 1;
     memcpy(t, topic, tn); t[tn] = '\0';
 
-    char buf[512];
+    char buf[1024];
     int bn = dlen < (int)sizeof(buf) - 1 ? dlen : (int)sizeof(buf) - 1;
     memcpy(buf, data, bn); buf[bn] = '\0';
-
+    
     if (strcmp(t, "mesh/cmd/read") == 0) {
         pending_read_broadcast = true;
         ESP_LOGI(MESH_TAG, "[MQTT] READ");
