@@ -60,6 +60,7 @@ extern volatile bool pending_reboot_unicast;  /* root: reboot unicast agendado  
 extern uint8_t reboot_unicast_mac[6];         /* MAC alvo do reboot unicast        */
 extern volatile bool pending_mark_valid;      /* root: mark-app-valid agendado     */
 extern uint8_t mark_valid_mac[6];             /* MAC alvo do mark-app-valid        */
+extern volatile bool heap_monitor_enabled;    /* root: publica a própria heap (mesh/cmd/heapmon) */
 
 
 
@@ -70,6 +71,7 @@ void mac_to_str(const uint8_t mac[6], char *out /* >=18 bytes */);
 void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 void read_timer(void *arg);
 void status_timer(void *arg);
+void heap_timer(void *arg);
 
 void start_mesh(void);
 esp_err_t esp_mesh_comm_p2p_start(void);

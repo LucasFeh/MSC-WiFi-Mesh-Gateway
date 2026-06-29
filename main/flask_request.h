@@ -9,7 +9,7 @@
 #include "esp_log.h"
 
 /* Broker MQTT no Raspberry (mesma máquina do Flask). IP fixo, sem auth. */
-#define MQTT_BROKER_URI        "mqtt://192.168.10.190:1883"
+#define MQTT_BROKER_URI        "mqtt://192.168.15.191:1883"
 
 /* Tópicos — ver docs/superpowers/specs/2026-06-18-i2c-to-mqtt-migration-design.md */
 #define TOPIC_READING          "mesh/reading"
@@ -17,6 +17,7 @@
 #define TOPIC_OFFLINE          "mesh/offline"
 #define TOPIC_OTA_PROGRESS     "mesh/ota/progress"
 #define TOPIC_ROOT_STATE       "mesh/root/state"
+#define TOPIC_HEAP             "mesh/root/heap"
 #define TOPIC_CMD_WILDCARD     "mesh/cmd/#"
 
 extern const char *MESH_TAG;
@@ -26,6 +27,7 @@ extern void notify_offline(const uint8_t mac[6]);
 extern void post_reading_to_flask(const char *mac_str, uint8_t ch1, uint8_t ch2, uint8_t ch3, float tensao);
 extern void post_status_to_flask(const char *mac_str, const char *parent_str, uint8_t layer, int8_t rssi, const char *version);
 extern void post_ota_event(const char *json_body);
+extern void post_heap_to_flask(void);
 extern void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 extern void flask_client_init(void);
 

@@ -16,6 +16,7 @@ volatile bool pending_reboot_unicast = false;  /* reboot unicast para MAC espec�
 uint8_t reboot_unicast_mac[6] = {0};
 volatile bool pending_mark_valid = false;       /* mark-app-valid agendado (self ou unicast) */
 uint8_t mark_valid_mac[6] = {0};
+volatile bool heap_monitor_enabled = false;     /* root publica a própria heap (mesh/cmd/heapmon) */
 
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static mesh_addr_t mesh_parent_addr;
@@ -48,6 +49,7 @@ esp_err_t esp_mesh_comm_p2p_start(void)
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 8192, NULL, 5, NULL);
         xTaskCreate(read_timer, "RHT", 8192, NULL, 5, NULL);
         xTaskCreate(status_timer, "STMR", 8192, NULL, 5, NULL);
+        xTaskCreate(heap_timer, "HEAP", 4096, NULL, 4, NULL);
     }
     return ESP_OK;
 }
@@ -278,18 +280,19 @@ void esp_mesh_p2p_tx_main(void *arg)
             }
             ESP_LOGI(MESH_TAG, "[TX] STATUS_REQUEST -> %d no(s)", scount);
 
-            /* status do próprio root (layer 1): mantém a linha do root viva na UI */
-            if (is_got_ip) {
-                wifi_ap_record_t ap_info;
-                int8_t rssi = 0;
-                if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
-                    rssi = ap_info.rssi;
-                uint8_t mac[6];
-                char mac_str[18];
-                esp_wifi_get_mac(WIFI_IF_STA, mac);
-                mac_to_str(mac, mac_str);
-                post_status_to_flask(mac_str, "wifi_router", 1, rssi, FW_VERSION);
-            }
+            /* status do próprio root (layer 1): publicado todo ciclo de status,
+               sem gate de is_got_ip. Se o status rodou e o MQTT está conectado, o
+               root está online — e post_status_to_flask já aborta se não estiver.
+               Assim o root segue a MESMA regra de liveness dos demais nós. */
+            wifi_ap_record_t ap_info;
+            int8_t rssi = 0;
+            if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+                rssi = ap_info.rssi;
+            uint8_t mac[6];
+            char mac_str[18];
+            esp_wifi_get_mac(WIFI_IF_STA, mac);
+            mac_to_str(mac, mac_str);
+            post_status_to_flask(mac_str, "wifi_router", 1, rssi, FW_VERSION);
         }
 
         if(pending_reboot){
@@ -461,6 +464,20 @@ void status_timer(void *arg)
 {
     while (1) {
         pending_status_broadcast = true;
+        ESP_LOGI(MESH_TAG, "[STATUS] broadcast de status enviado");
         vTaskDelay(pdMS_TO_TICKS(1000) * STATUS_PERIOD_S);
+    }
+}
+
+/* Período de publicação da heap (s) quando o monitor está ligado. Diagnóstico de
+   vazamento de memória; só publica com heap_monitor_enabled (ligado por
+   mesh/cmd/heapmon). OFF é o default: a task acorda, não publica e volta a dormir. */
+#define HEAP_MONITOR_PERIOD_S 10
+
+void heap_timer(void *arg)
+{
+    while (1) {
+        if (heap_monitor_enabled) post_heap_to_flask();
+        vTaskDelay(pdMS_TO_TICKS(1000) * HEAP_MONITOR_PERIOD_S);
     }
 }

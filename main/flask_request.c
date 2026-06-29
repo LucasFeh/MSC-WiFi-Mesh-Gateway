@@ -1,6 +1,7 @@
 #include "mesh_main.h"
 #include "ota.h"
 #include "i2c.h"            /* i2c_macs[], i2c_mac_count, i2c_macs_mutex, MAX_MACS */
+#include "esp_timer.h"      /* esp_timer_get_time() -> uptime no payload de heap */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -78,6 +79,21 @@ void post_ota_event(const char *json_body)
     esp_mqtt_client_publish(s_mqtt, TOPIC_OTA_PROGRESS, json_body, 0, 1, 0);  /* len=0 -> strlen */
 }
 
+/* Diagnóstico de vazamento de heap: free atual + watermark mínimo histórico
+   (só cai se houver leak) + uptime. Chamado pela task heap_timer (periódico) e
+   uma vez ao ligar o monitor (amostra imediata). QoS 0, não retido. */
+void post_heap_to_flask(void)
+{
+    if (!s_mqtt_connected) return;
+    char body[128];
+    int n = snprintf(body, sizeof(body),
+                     "{\"free_heap\":%u,\"min_free_heap\":%u,\"uptime_s\":%llu}",
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)esp_get_minimum_free_heap_size(),
+                     (unsigned long long)(esp_timer_get_time() / 1000000));
+    esp_mqtt_client_publish(s_mqtt, TOPIC_HEAP, body, n, 0, 0);
+}
+
 /* ---- comando mesh/cmd/maclist: repõe a lista de MACs a partir do JSON ----
    Aceita {"macs":["aa:bb:cc:dd:ee:ff", ...]}; varre tokens entre aspas e tenta
    ler 6 octetos hex em cada um. "macs" e demais chaves não casam parse_mac. */
@@ -120,6 +136,11 @@ static void on_command(const char *topic, int tlen, const char *data, int dlen)
         bool on = (strstr(buf, "true") != NULL);
         ota_set_monitor(on);
         ESP_LOGI(MESH_TAG, "[MQTT] OTAMON %s", on ? "ON" : "OFF");
+    } else if (strcmp(t, "mesh/cmd/heapmon") == 0) {
+        bool on = (strstr(buf, "true") != NULL);
+        heap_monitor_enabled = on;
+        ESP_LOGI(MESH_TAG, "[MQTT] HEAPMON %s", on ? "ON" : "OFF");
+        if (on) post_heap_to_flask();   /* amostra imediata ao ligar */
     } else if (strcmp(t, "mesh/cmd/ota") == 0) {
         char file[64], url[160], target[24];
         if (json_str(buf, "file", file, sizeof(file)) && json_str(buf, "url", url, sizeof(url))) {
