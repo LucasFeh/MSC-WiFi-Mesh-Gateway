@@ -28,7 +28,8 @@
       "Bash(git --no-pager log --oneline -5 -- server/app.py)",
       "Bash(git --no-pager diff 626fd5a^ 626fd5a -- server/app.py)",
       "Read(//d/MICROCONTROLLER_DEV/MSC-WEBPAGE-PGNSS-DI251829/**)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(rtk git *)"
     ]
   }
 }
