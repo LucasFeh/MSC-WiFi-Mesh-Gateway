@@ -193,7 +193,6 @@ void esp_mesh_p2p_rx_main(void *arg)
                                 break;
                             }
                         }
-                    pending_status_broadcast = true;
                     break;
                 case BIN_MSG_STATUS:
                     
@@ -266,19 +265,11 @@ void esp_mesh_p2p_tx_main(void *arg)
                 .proto = MESH_PROTO_BIN,
                 .tos   = MESH_TOS_P2P,
             };
-            uint8_t smacs[MAX_MACS][6];
-            int scount = 0;
-            if (xSemaphoreTake(i2c_macs_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                scount = i2c_mac_count;
-                memcpy(smacs, i2c_macs, scount * 6);
-                xSemaphoreGive(i2c_macs_mutex);
-            }
-            for (int i = 0; i < scount; i++) {
-                mesh_addr_t dest;
-                memcpy(dest.addr, smacs[i], 6);
-                esp_mesh_send(&dest, &txs, MESH_DATA_P2P, NULL, 0);
-            }
-            ESP_LOGI(MESH_TAG, "[TX] STATUS_REQUEST -> %d no(s)", scount);
+            /* Broadcast real: um único pacote ao grupo mesh (MESH_GROUP_ADDR).
+               Todos os nós que entraram no grupo via esp_mesh_set_group_id
+               recebem — sem loop por MAC nem leitura da lista i2c_macs. */
+            esp_mesh_send(&MESH_GROUP_ADDR, &txs, MESH_DATA_GROUP, NULL, 0);
+            ESP_LOGI(MESH_TAG, "[TX] STATUS_REQUEST (broadcast grupo)");
 
             /* status do próprio root (layer 1): publicado todo ciclo de status,
                sem gate de is_got_ip. Se o status rodou e o MQTT está conectado, o
